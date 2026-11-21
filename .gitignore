@@ -3,3 +3,7 @@ wd-hydrus-tagger/__pycache__/*
 wd_hydrus_tagger.egg-info/*
 dist/*
 .idea
+config.yaml
+session.log
+session.complete
+hashes.batch.complete

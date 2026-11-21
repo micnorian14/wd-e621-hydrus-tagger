@@ -3,9 +3,7 @@
 If the root folder (the folder this .md file is in) has moved or has been renamed, delete the venv folder if it exists and follow first time installation instructions.
 
 ## REQUIREMENTS:
-The original requirements for this tool called for either python 3.9.x or 3.10.x. However, I have gotten it to build in it's current form on python 3.11 (pip 22.3). As such, I recommend using python 3.11 to build. You should NOT use python 3.12 as it has removed distutils, which is necessary for some of the dependencies and I don't know how I'd go about fixing everything that has broken. Sorry. Anyways:
-
-* Python 3.11.x
+* Python 3.11.x or 3.12.x
 * Git 2.45.2 or later
 * Hydrus Network with API key
 * A willingness to google stuff when things go wrong
@@ -46,7 +44,11 @@ to do so:
 7. Repeat steps 2 through 6, but under content select "tag siblings"
 
 ## CONFIGURATION:
-Edit config.yaml. At minimum set your Hydrus API `token`.
+1. Copy the example config: in the root folder, run `copy config.yaml.example config.yaml` in cmd
+2. Edit config.yaml. At minimum set your Hydrus API `token`.
+   - `tag_service` defaults to "A.I. Tags". If you named your tag service something else, change it here.
+   - config.yaml is git-ignored, so your token stays on your PC and won't be committed.
+
 All other settings (host, model, threshold, tag_service, cpu, ratings_only, privacy) are optional and have sensible defaults.
 CLI flags always override values from the config file.
 
@@ -157,7 +159,7 @@ python -m wd-hydrus-tagger evaluate-api 123_your_files_hash_456
   --threshold FLOAT   The threshhold to drop tags below
   --host TEXT         The URL for your Hydrus server
   --tag-service TEXT  The tag service to send tags that match the threshold to
-  --ratings-only BOOL Drop all tags except for those that identify the content rating
+  --ratings-only BOOL Only add the content rating tag (no content tags). Existing tags are never removed
   --privacy BOOL      Show or hide the tag output to the cli
 ```
 
@@ -174,7 +176,7 @@ Where `hashes.txt` is a file containing one Hydrus file hash per line.
   --threshold FLOAT   The threshhold to drop tags below
   --host TEXT         The URL for your Hydrus server
   --tag-service TEXT  The tag service to send tags that match the threshold to
-  --ratings-only BOOL Drop all tags except for those that identify the content rating
+  --ratings-only BOOL Only add the content rating tag (no content tags). Existing tags are never removed
   --privacy BOOL      Show or hide the tag output to the cli
   --tags              Treat the input file as a list of Hydrus search tags instead of hashes
   --skip-resume       Ignore any unfinished checkpoint and start a fresh batch
@@ -187,7 +189,7 @@ Everything has been confirmed to work on various Windows 10 installations. I've 
 If you do run into problems on other operating systems, the culprit is likely in `interrogate.py`, specifically where path() is invoked or it's something to do with the .bat files and how they're written.
 
 `run_e621_hashes.bat` uses an e621 model that doesn't tag content ratings but should provide much more accurate tags for furry artwork. ...
-`run_wd_ratings.bat` runs the normal WD model which DOES tag ratings, but discards all tags except for the ratings.
+`run_wd_ratings.bat` runs the normal WD model which DOES tag ratings, but only adds the rating tag (no content tags). It never removes tags already on the file.
 It's recommended to run `run_wd_ratings.bat` AFTER running `run_e621_hashes.bat` ...
 Note that this is UNNECESSARY if `run_wd_hashes.bat` is ran on the file FIRST ...
 
@@ -207,8 +209,6 @@ If you prefer a different model for some reason, then just create a new folder i
 You can have each .bat send the tags to their own personal tag service if you'd like, just create a new tag service and change the .bat file to point to the new tag service. This might be useful if you want to delete wd-hydrus-tagger tags from furry files, or delete a tag service if/when a new, better tagging model for anime/furry art comes out so you can re-tag everything.
 
 As of the latest version of this tagging tool, the way that the "ai generated tags" tags are made is different, meaning they very likely wont match the tags given to already processed files. I recommend sibling-ing the previous tag to the newly created one, or vice versa.
-
-Python 3.12 seems to have broken some of the dependencies used by this tool. Perhaps with enough fiddling and changing required package versions it might work, but it's much easier to just use python 3.11. python 3.10 might also work, but I believe the latest version of onnxruntime as well as a couple other packages that were updated require atleast python 3.11.
 
 I tested and confirmed that cuDNN 8.9.7 also works without issue, however as the onnxruntime documentation specifically calls for cuDNN 8.9.2, it's what i've listed in the setup instructions.
 

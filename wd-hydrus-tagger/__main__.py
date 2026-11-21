@@ -118,7 +118,7 @@ def evaluate(filename, cpu, model, threshold):
 @click.option("--threshold", default=0.35, help="The threshold to drop tags below")
 @click.option("--host", default="http://127.0.0.1:45869", help="The URL for your Hydrus server ")
 @click.option("--tag-service", default="A.I. Tags", help="The Hydrus tag service to add tags to")
-@click.option("--ratings-only", default=False, help="Strip all tags except for content rating")
+@click.option("--ratings-only", default=False, help="Only add the content rating tag (no content tags). Existing tags are never removed")
 @click.option("--privacy", default=True, help="hides the tag output from the cli")
 def evaluate_api(hash, token, cpu, model, threshold, host, tag_service, ratings_only, privacy):
     config = load_config()
@@ -205,7 +205,7 @@ def debug(msg):
 @click.option("--threshold", default=0.35, help="The threshold to drop tags below")
 @click.option("--host", default="http://127.0.0.1:45869", help="The URL for your Hydrus server ")
 @click.option("--tag-service", default="A.I. Tags", help="The Hydrus tag service to add tags to")
-@click.option("--ratings-only", default=False, help="Strip all tags except for content rating")
+@click.option("--ratings-only", default=False, help="Only add the content rating tag (no content tags). Existing tags are never removed")
 @click.option("--privacy", default=True, help="hides the tag output from the cli")
 @click.option("--tags", is_flag=True, help="Treat inputfile as a list of Hydrus search tags instead of hashes")
 @click.option("--skip-resume", is_flag=True, help="Ignore any unfinished checkpoint and start a fresh batch")
