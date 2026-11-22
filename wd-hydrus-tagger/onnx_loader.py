@@ -1,7 +1,7 @@
 import importlib
-import sys
-import subprocess
 import os
+import subprocess
+import sys
 
 skip_install = False
 index_url = os.environ.get('INDEX_URL', "")
@@ -31,7 +31,7 @@ def run(command, desc=None, errdesc=None, custom_env=None, live=False):
 
     if live:
         result = subprocess.run(
-            command, shell=True, env=os.environ if custom_env is None else custom_env)
+            command, shell=True, check=False, env=os.environ if custom_env is None else custom_env)
         if result.returncode != 0:
             raise RuntimeError(f"""{errdesc or 'Error running command'}.
 Command: {command}
@@ -39,8 +39,7 @@ Error code: {result.returncode}""")
 
         return ""
 
-    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            shell=True, env=os.environ if custom_env is None else custom_env)
+    result = subprocess.run(command, capture_output=True, shell=True, check=False, env=os.environ if custom_env is None else custom_env)
 
     if result.returncode != 0:
 

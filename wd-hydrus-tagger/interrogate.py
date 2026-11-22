@@ -1,8 +1,9 @@
 import os
-import pandas as pd
-import numpy as np
 import re
+
 import click
+import numpy as np
+import pandas as pd
 
 session_debug = []
 
@@ -10,12 +11,11 @@ def debug(msg):
     click.echo(msg)
     session_debug.append(msg)
 
-from typing import Tuple, Dict
-from PIL import Image
 from pathlib import Path
 
-from . import dbimutils
-from . import onnx_loader
+from PIL import Image
+
+from . import dbimutils, onnx_loader
 
 tag_escape_pattern = re.compile(r'([\\()])')
 use_cpu = True
@@ -45,7 +45,7 @@ class WaifuDiffusionInterrogator:
         self.numberofratings = numberofratings
         self.kwargs = kwargs
 
-    def findpaths(self) -> Tuple[os.PathLike, os.PathLike]:
+    def findpaths(self) -> tuple[os.PathLike, os.PathLike]:
         debug(f"DEBUG: Loading {self.name} model file from {self.kwargs['repo_id']}")
 
         model_file = Path('./model/' + self.folder + '/' + self.model_file)
@@ -98,9 +98,9 @@ class WaifuDiffusionInterrogator:
     def interrogate(
             self,
             image: Image
-    ) -> Tuple[
-        Dict[str, float],  # rating confidents
-        Dict[str, float]  # tag confidents
+    ) -> tuple[
+        dict[str, float],  # rating confidents
+        dict[str, float]  # tag confidents
     ]:
         # ... rest of the interrogate method stays the same ...
         # init model

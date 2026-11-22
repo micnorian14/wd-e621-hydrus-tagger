@@ -1,15 +1,16 @@
+import json
 import os.path
 import re
+from io import BytesIO
 
 import click
-from PIL import Image, ImageFile
-from . import interrogate
 import hydrus_api
-from io import BytesIO
-import json
-import yaml
 import imageio.v3 as iio
 import numpy as np
+import yaml
+from PIL import Image, ImageFile
+
+from . import interrogate
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -98,12 +99,12 @@ def evaluate(filename, cpu, model, threshold):
     rating = "none"
     if modelinfo['ratingsflag']:
         ratings["none"] = 0.0
-        for key in ratings.keys():
+        for key in ratings:
             if ratings[key] > ratings[rating]:
                 rating = key
     clipped_tags = []
 
-    for key in tags.keys():
+    for key in tags:
         if tags[key] > threshold:
             clipped_tags.append(key)
     click.echo("rating: " + rating)
@@ -166,13 +167,13 @@ def evaluate_api(hash, token, cpu, model, threshold, host, tag_service, ratings_
     rating = "none"
     if modelinfo['ratingsflag']:
         ratings["none"] = 0.0
-        for key in ratings.keys():
+        for key in ratings:
             if ratings[key] > ratings[rating]:
                 rating = key
     clipped_tags = []
 
     if not ratings_only:
-        for key in tags.keys():
+        for key in tags:
             if tags[key] > threshold:
                 clipped_tags.append(key)
 
@@ -473,6 +474,7 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, host, tag_servic
                 try:
                     for index in frames_indexes:
                         frame = None
+                        last_error = None
                         # Prefer pyav when available; fall back to default backend
                         for plugin in ("pyav", None):
                             try:
@@ -481,10 +483,11 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, host, tag_servic
                                     kwargs["plugin"] = plugin
                                 frame = iio.imread(BytesIO(file), extension=file_meta["ext"], **kwargs)
                                 break
-                            except Exception:
+                            except Exception as e:  # noqa: BLE001 - try the next backend
+                                last_error = e
                                 continue
                         if frame is None:
-                            click.echo(f"  could not read frame {int(index)} of {hash}")
+                            click.echo(f"  could not read frame {int(index)} of {hash}: {last_error}")
                             continue
                         image = Image.fromarray(frame)
                         rate, tag = integerator.interrogate(image)
@@ -506,13 +509,13 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, host, tag_servic
             rating = "none"
             if modelinfo['ratingsflag']:
                 ratings["none"] = 0.0
-                for key in ratings.keys():
+                for key in ratings:
                     if ratings[key] > ratings[rating]:
                         rating = key
             clipped_tags = []
 
             if not ratings_only:
-                for key in tags.keys():
+                for key in tags:
                     if tags[key] > threshold_local:
                         clipped_tags.append(key)
 
