@@ -1,6 +1,7 @@
 import json
 import os.path
 import re
+import sys
 from io import BytesIO
 
 import click
@@ -13,6 +14,11 @@ from PIL import Image, ImageFile
 from . import interrogate
 
 Image.MAX_IMAGE_PIXELS = None
+
+DEFAULT_MODEL = "wd-v1-4-vit-tagger-v2"
+DEFAULT_THRESHOLD = 0.35
+DEFAULT_HOST = "http://127.0.0.1:45869"
+DEFAULT_TAG_SERVICE = "A.I. Tags"
 
 
 def load_config(path="config.yaml"):
@@ -31,7 +37,54 @@ def resolve(cli_value, config_key, fallback, config):
     """Prefer an explicitly supplied CLI value; otherwise use config.yaml, then the hard-coded fallback."""
     if cli_value is not None:
         return cli_value
-    return config.get(config_key, fallback)
+    value = config.get(config_key)
+    return fallback if value is None else value
+
+
+def to_bool(value):
+    """Read a true/false setting that may come from YAML as a bool, number or word."""
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "t", "yes", "y", "on")
+    return bool(value)
+
+
+# Older bat files and docs pass these as "--cpu 0", "--privacy true", etc.
+# They are on/off flags now, so translate the old form before click sees it.
+_LEGACY_BOOL_FLAGS = {
+    "--cpu": ("--cpu", "--gpu"),
+    "--privacy": ("--privacy", "--show-tags"),
+    "--ratings-only": ("--ratings-only", None),
+}
+_TRUE_WORDS = {"1", "true", "t", "yes", "y", "on"}
+_FALSE_WORDS = {"0", "false", "f", "no", "n", "off"}
+
+
+def upgrade_legacy_bool_args(argv):
+    out = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        name, eq, value = arg.partition("=")
+        if name in _LEGACY_BOOL_FLAGS:
+            on_flag, off_flag = _LEGACY_BOOL_FLAGS[name]
+            word = None
+            if eq:
+                word = value.strip().lower()
+            elif i + 1 < len(argv) and argv[i + 1].strip().lower() in _TRUE_WORDS | _FALSE_WORDS:
+                word = argv[i + 1].strip().lower()
+                i += 1
+            if word in _TRUE_WORDS:
+                out.append(on_flag)
+            elif word in _FALSE_WORDS:
+                if off_flag:
+                    out.append(off_flag)
+            else:
+                out.append(arg)
+            i += 1
+            continue
+        out.append(arg)
+        i += 1
+    return out
 
 
 kaomojis = [
@@ -69,14 +122,14 @@ def cli():
 
 @click.command()
 @click.argument("filename")
-@click.option("--cpu", default=False, help="Use CPU instead of GPU")
-@click.option("--model", default="wd-v1-4-vit-tagger-v2", help="The tagging model to use")
-@click.option("--threshold", default=0.35, help="The threshold to drop tags below")
+@click.option("--cpu/--gpu", default=None, help="Run the model on the CPU or the GPU (default: config.yaml, else GPU)")
+@click.option("--model", default=None, help=f"The tagging model folder to use (default: config.yaml, else {DEFAULT_MODEL})")
+@click.option("--threshold", type=float, default=None, help=f"The threshold to drop tags below (default: config.yaml, else {DEFAULT_THRESHOLD})")
 def evaluate(filename, cpu, model, threshold):
     config = load_config()
-    cpu = resolve(cpu if cpu is not False else None, "cpu", False, config)
-    model = resolve(model if model != "wd-v1-4-vit-tagger-v2" else None, "model", "wd-v1-4-vit-tagger-v2", config)
-    threshold = resolve(threshold if threshold != 0.35 else None, "threshold", 0.35, config)
+    cpu = to_bool(resolve(cpu, "cpu", False, config))
+    model = resolve(model, "model", DEFAULT_MODEL, config)
+    threshold = float(resolve(threshold, "threshold", DEFAULT_THRESHOLD, config))
 
     if not os.path.isfile('./model/' + model + '/info.json'):
         raise ValueError("info.json not found in model folder!")
@@ -114,25 +167,25 @@ def evaluate(filename, cpu, model, threshold):
 @click.command()
 @click.argument("hash")
 @click.option("--token", help="The API token for your Hydrus server")
-@click.option("--cpu", default=False, help="Use CPU instead of GPU")
-@click.option("--model", default="SmilingWolf/wd-v1-4-vit-tagger-v2", help="The tagging model to use")
-@click.option("--threshold", default=0.35, help="The threshold to drop tags below")
-@click.option("--host", default="http://127.0.0.1:45869", help="The URL for your Hydrus server ")
-@click.option("--tag-service", default="A.I. Tags", help="The Hydrus tag service to add tags to")
-@click.option("--ratings-only", default=False, help="Only add the content rating tag (no content tags). Existing tags are never removed")
-@click.option("--privacy", default=True, help="hides the tag output from the cli")
+@click.option("--cpu/--gpu", default=None, help="Run the model on the CPU or the GPU (default: config.yaml, else GPU)")
+@click.option("--model", default=None, help=f"The tagging model folder to use (default: config.yaml, else {DEFAULT_MODEL})")
+@click.option("--threshold", type=float, default=None, help=f"The threshold to drop tags below (default: config.yaml, else {DEFAULT_THRESHOLD})")
+@click.option("--host", default=None, help=f"The URL for your Hydrus server (default: config.yaml, else {DEFAULT_HOST})")
+@click.option("--tag-service", default=None, help=f"The local Hydrus tag service to add tags to (default: config.yaml, else '{DEFAULT_TAG_SERVICE}')")
+@click.option("--ratings-only", is_flag=True, default=None, help="Only add the content rating tag (no content tags). Existing tags are never removed")
+@click.option("--privacy/--show-tags", default=None, help="Hide or show the tag output in the console (default: config.yaml, else hide)")
 def evaluate_api(hash, token, cpu, model, threshold, host, tag_service, ratings_only, privacy):
     config = load_config()
     token = resolve(token, "token", None, config)
     if not token:
         raise click.UsageError("API token required. Set 'token' in config.yaml or pass --token")
-    cpu = resolve(cpu if cpu is not False else None, "cpu", False, config)
-    model = resolve(model if model != "wd-v1-4-vit-tagger-v2" else None, "model", "wd-v1-4-vit-tagger-v2", config)
-    threshold = resolve(threshold if threshold != 0.35 else None, "threshold", 0.35, config)
-    host = resolve(host if host != "http://127.0.0.1:45869" else None, "host", "http://127.0.0.1:45869", config)
-    tag_service = resolve(tag_service if tag_service != "A.I. Tags" else None, "tag_service", "A.I. Tags", config)
-    ratings_only = resolve(ratings_only if ratings_only is not False else None, "ratings_only", False, config)
-    privacy = resolve(privacy if privacy is not True else None, "privacy", True, config)
+    cpu = to_bool(resolve(cpu, "cpu", False, config))
+    model = resolve(model, "model", DEFAULT_MODEL, config)
+    threshold = float(resolve(threshold, "threshold", DEFAULT_THRESHOLD, config))
+    host = resolve(host, "host", DEFAULT_HOST, config)
+    tag_service = resolve(tag_service, "tag_service", DEFAULT_TAG_SERVICE, config)
+    ratings_only = to_bool(resolve(ratings_only, "ratings_only", False, config))
+    privacy = to_bool(resolve(privacy, "privacy", True, config))
 
     if not os.path.isfile('./model/' + model + '/info.json'):
         raise ValueError("info.json not found in model folder!")
@@ -201,30 +254,30 @@ def debug(msg):
 @click.command()
 @click.argument("inputfile")
 @click.option("--token", help="The API token for your Hydrus server")
-@click.option("--cpu", default=False, help="Use CPU instead of GPU")
-@click.option("--model", default="wd-v1-4-vit-tagger-v2", help="The tagging model to use")
-@click.option("--threshold", default=0.35, help="The threshold to drop tags below")
-@click.option("--host", default="http://127.0.0.1:45869", help="The URL for your Hydrus server ")
-@click.option("--tag-service", default="A.I. Tags", help="The Hydrus tag service to add tags to")
-@click.option("--ratings-only", default=False, help="Only add the content rating tag (no content tags). Existing tags are never removed")
-@click.option("--privacy", default=True, help="hides the tag output from the cli")
-@click.option("--tags", is_flag=True, help="Treat inputfile as a list of Hydrus search tags instead of hashes")
+@click.option("--cpu/--gpu", default=None, help="Run the model on the CPU or the GPU (default: config.yaml, else GPU)")
+@click.option("--model", default=None, help=f"The tagging model folder to use (default: config.yaml, else {DEFAULT_MODEL})")
+@click.option("--threshold", type=float, default=None, help=f"The threshold to drop tags below (default: config.yaml, else {DEFAULT_THRESHOLD})")
+@click.option("--host", default=None, help=f"The URL for your Hydrus server (default: config.yaml, else {DEFAULT_HOST})")
+@click.option("--tag-service", default=None, help=f"The local Hydrus tag service to add tags to (default: config.yaml, else '{DEFAULT_TAG_SERVICE}')")
+@click.option("--ratings-only", is_flag=True, default=None, help="Only add the content rating tag (no content tags). Existing tags are never removed")
+@click.option("--privacy/--show-tags", default=None, help="Hide or show the tag output in the console (default: config.yaml, else hide)")
+@click.option("--tags", "tags_mode", is_flag=True, help="Treat inputfile as a list of Hydrus search tags instead of hashes")
 @click.option("--skip-resume", is_flag=True, help="Ignore any unfinished checkpoint and start a fresh batch")
 @click.option("--skip-tagged", is_flag=True, help="Skip files that already have an AI-generated tags marker")
 @click.option("--limit", type=int, default=None, help="Stop after this many files have been successfully tagged (skips do not count)")
-def evaluate_api_batch(inputfile, token, cpu, model, threshold, host, tag_service, ratings_only, privacy, tags, skip_resume, skip_tagged, limit):
+def evaluate_api_batch(inputfile, token, cpu, model, threshold, host, tag_service, ratings_only, privacy, tags_mode, skip_resume, skip_tagged, limit):
     interrogate.session_debug.clear()
     config = load_config()
     token = resolve(token, "token", None, config)
     if not token:
         raise click.UsageError("API token required. Set 'token' in config.yaml or pass --token")
-    cpu = resolve(cpu if cpu is not False else None, "cpu", False, config)
-    model = resolve(model if model != "wd-v1-4-vit-tagger-v2" else None, "model", "wd-v1-4-vit-tagger-v2", config)
-    threshold = resolve(threshold if threshold != 0.35 else None, "threshold", 0.35, config)
-    host = resolve(host if host != "http://127.0.0.1:45869" else None, "host", "http://127.0.0.1:45869", config)
-    tag_service = resolve(tag_service if tag_service != "A.I. Tags" else None, "tag_service", "A.I. Tags", config)
-    ratings_only = resolve(ratings_only if ratings_only is not False else None, "ratings_only", False, config)
-    privacy = resolve(privacy if privacy is not True else None, "privacy", True, config)
+    cpu = to_bool(resolve(cpu, "cpu", False, config))
+    model = resolve(model, "model", DEFAULT_MODEL, config)
+    threshold = float(resolve(threshold, "threshold", DEFAULT_THRESHOLD, config))
+    host = resolve(host, "host", DEFAULT_HOST, config)
+    tag_service = resolve(tag_service, "tag_service", DEFAULT_TAG_SERVICE, config)
+    ratings_only = to_bool(resolve(ratings_only, "ratings_only", False, config))
+    privacy = to_bool(resolve(privacy, "privacy", True, config))
 
     if not os.path.isfile(inputfile):
         raise ValueError("input file not found!")
@@ -308,7 +361,7 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, host, tag_servic
 
     if hashes is None:
         hashes = []
-    elif tags:
+    elif tags_mode:
         with open(inputfile) as f:
             search_tags = [line.strip() for line in f if line.strip()]
         # --limit stops the run after N successful tags. It does not override
@@ -579,4 +632,4 @@ if __name__ == '__main__':
     cli.add_command(evaluate)
     cli.add_command(evaluate_api)
     cli.add_command(evaluate_api_batch)
-    cli()
+    cli(args=upgrade_legacy_bool_args(sys.argv[1:]))
