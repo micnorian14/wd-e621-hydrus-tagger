@@ -419,13 +419,15 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, host, tag_servic
         return False
 
     # When --limit is set, the bar tracks successful tags against that limit.
-    # Otherwise it tracks the full hash list.
+    # Otherwise it tracks the full hash list and moves on every file.
     if limit:
         bar = click.progressbar(length=limit)
     else:
         bar = click.progressbar(length=len(hashes))
     with bar:
         for hash in hashes:
+            if not limit:
+                bar.update(1)
             click.echo(" processing: " + hash)
             try:
                 file = client.get_file(hash).content
@@ -438,7 +440,7 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, host, tag_servic
                 file_meta = metadata["metadata"][0] if metadata["metadata"] else None
             else:
                 file_meta = metadata[0] if metadata else None
-            num_frames = file_meta["num_frames"] if file_meta else None
+            num_frames = file_meta.get("num_frames") if file_meta else None
             ext = file_meta.get("ext", "").lower() if file_meta else ""
 
             # Skip files that already have this model's AI-generated marker
@@ -501,7 +503,7 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, host, tag_servic
                         log_result(hash, "failed to decode any frames")
                         skipped_count += 1
                         continue
-                except BaseException as e:
+                except Exception as e:
                     log_result(hash, f"failed to decode: {e}")
                     skipped_count += 1
                     continue
