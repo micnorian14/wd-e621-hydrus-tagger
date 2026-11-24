@@ -58,5 +58,9 @@ cpu: false
 ratings_only: false
 
 ## Console output
-# true = don't print the tags in the console window. false = print them.
+# true = don't print each file's tags in the console window. false = print them.
 privacy: true
+# false = a short summary and one progress bar. true = every detail: DEBUG
+# lines, one line per file and the full service key. Either way session.log
+# gets the same details.
+verbose: false
