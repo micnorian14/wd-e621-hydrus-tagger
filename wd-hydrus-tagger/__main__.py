@@ -1,6 +1,5 @@
 import json
 import os.path
-import re
 import sys
 from io import BytesIO
 
@@ -11,7 +10,8 @@ import numpy as np
 import yaml
 from PIL import Image, ImageFile
 
-from . import interrogate
+from . import hydrus_safety, interrogate
+from .hydrus_safety import SafetyError
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -115,6 +115,118 @@ kaomojis = [
 ]
 
 
+def debug(msg):
+    """Print a debug line and record it for session.log."""
+    click.echo(msg)
+    interrogate.session_debug.append(msg)
+
+
+def load_model(model, cpu):
+    """Read model/<model>/info.json and load the model. Returns (modelinfo, interrogator)."""
+    if not os.path.isfile('./model/' + model + '/info.json'):
+        raise click.ClickException(f"info.json not found in model folder 'model/{model}'!")
+
+    with open('./model/' + model + '/info.json') as json_f:
+        modelinfo = json.load(json_f)
+
+    integerator = interrogate.WaifuDiffusionInterrogator(
+        modelinfo['modelname'],
+        modelinfo['modelfile'],
+        modelinfo['tagsfile'],
+        model,
+        modelinfo['ratingsflag'],
+        modelinfo['numberofratings'],
+        repo_id=modelinfo['source'],
+    )
+    integerator.load(cpu)
+    return modelinfo, integerator
+
+
+def common_settings(config, cpu, model, threshold, max_tags):
+    """Settings shared by every command: CLI flag, then config.yaml, then built-in default."""
+    settings = {
+        "cpu": to_bool(resolve(cpu, "cpu", False, config)),
+        "model": resolve(model, "model", DEFAULT_MODEL, config),
+        "threshold": resolve(threshold, "threshold", DEFAULT_THRESHOLD, config),
+        "max_tags": resolve(max_tags, "max_tags", hydrus_safety.DEFAULT_MAX_TAGS, config),
+    }
+    try:
+        warning = hydrus_safety.check_threshold(settings["threshold"])
+        settings["threshold"] = float(settings["threshold"])
+        settings["max_tags"] = hydrus_safety.check_max_tags(settings["max_tags"])
+    except SafetyError as e:
+        raise click.UsageError(str(e)) from None
+    if warning:
+        click.echo(warning, err=True)
+    return settings
+
+
+def api_settings(config, token, cpu, model, threshold, max_tags, host, tag_service, ratings_only, privacy):
+    """Settings for the Hydrus commands."""
+    settings = common_settings(config, cpu, model, threshold, max_tags)
+    settings["token"] = resolve(token, "token", None, config)
+    if not settings["token"]:
+        raise click.UsageError("API token required. Set 'token' in config.yaml or pass --token")
+    settings["host"] = resolve(host, "host", DEFAULT_HOST, config)
+    # An explicit --tag-service wins. Otherwise a pinned tag_service_key in
+    # config.yaml wins over the tag_service name.
+    if tag_service is not None:
+        settings["tag_service"], settings["tag_service_key"] = tag_service, None
+    else:
+        settings["tag_service"] = resolve(None, "tag_service", DEFAULT_TAG_SERVICE, config)
+        settings["tag_service_key"] = config.get("tag_service_key") or None
+    settings["ratings_only"] = to_bool(resolve(ratings_only, "ratings_only", False, config))
+    settings["privacy"] = to_bool(resolve(privacy, "privacy", True, config))
+    settings["timeout"] = (10, resolve(None, "request_timeout", hydrus_safety.DEFAULT_TIMEOUT[1], config))
+    return settings
+
+
+def connect(settings, allow_my_tags):
+    """Connect to Hydrus and find the one local tag service to write to."""
+    session = hydrus_safety.TimeoutSession(settings["timeout"])
+    client = hydrus_api.Client(settings["token"], settings["host"], session=session)
+    services = client.get_services()
+    try:
+        service = hydrus_safety.resolve_tag_service(
+            services,
+            name=settings["tag_service"],
+            key=settings["tag_service_key"],
+            allow_my_tags=allow_my_tags,
+        )
+    except SafetyError as e:
+        raise click.ClickException(str(e)) from None
+    debug(f"DEBUG: target tag service = '{service[1]}' (key {service[0]}, type {service[2]})")
+    return client, service
+
+
+def pick_rating(modelinfo, ratings):
+    """Highest-scoring rating name, or None if the model has no ratings."""
+    if not modelinfo['ratingsflag'] or not ratings:
+        return None
+    return max(ratings, key=lambda k: ratings[k])
+
+
+def build_tags(modelinfo, ratings, tag_scores, threshold, max_tags, ratings_only):
+    """Return (rating, content_tags, final_tags). final_tags is exactly what gets sent."""
+    rating = pick_rating(modelinfo, ratings)
+    content = [] if ratings_only else hydrus_safety.select_tags(tag_scores, threshold, max_tags)
+    content = hydrus_safety.sanitize_tags(content)
+    own = []
+    if rating:
+        own.append("rating:" + rating)
+    if ratings_only:
+        own.append("ratings only " + modelinfo['modelname'] + " ai generated tags")
+    else:
+        own.append(modelinfo['modelname'] + " ai generated tags")
+    # Our own tags keep their namespace (rating:...), everything is deduped.
+    final = hydrus_safety.sanitize_tags(content + hydrus_safety.sanitize_tags(own, keep_namespace=True), keep_namespace=True)
+    return rating, content, final
+
+
+def describe_send(file_hash, service, final_tags):
+    return f"{file_hash} -> '{service[1]}' ({service[0]}, type {service[2]}): {len(final_tags)} tags: {', '.join(final_tags)}"
+
+
 @click.group()
 def cli():
     pass
@@ -125,43 +237,16 @@ def cli():
 @click.option("--cpu/--gpu", default=None, help="Run the model on the CPU or the GPU (default: config.yaml, else GPU)")
 @click.option("--model", default=None, help=f"The tagging model folder to use (default: config.yaml, else {DEFAULT_MODEL})")
 @click.option("--threshold", type=float, default=None, help=f"The threshold to drop tags below (default: config.yaml, else {DEFAULT_THRESHOLD})")
-def evaluate(filename, cpu, model, threshold):
+@click.option("--max-tags", type=int, default=None, help=f"Keep at most this many content tags, highest scores first (default: config.yaml, else {hydrus_safety.DEFAULT_MAX_TAGS})")
+def evaluate(filename, cpu, model, threshold, max_tags):
     config = load_config()
-    cpu = to_bool(resolve(cpu, "cpu", False, config))
-    model = resolve(model, "model", DEFAULT_MODEL, config)
-    threshold = float(resolve(threshold, "threshold", DEFAULT_THRESHOLD, config))
-
-    if not os.path.isfile('./model/' + model + '/info.json'):
-        raise ValueError("info.json not found in model folder!")
-
-    with open('./model/' + model + '/info.json') as json_f:
-        modelinfo = json.load(json_f)
-
-    integerator = interrogate.WaifuDiffusionInterrogator(
-        modelinfo['modelname'],
-        modelinfo['modelfile'],
-        modelinfo['tagsfile'],
-        model,
-        modelinfo['ratingsflag'],
-        modelinfo['numberofratings'],
-        repo_id=modelinfo['source'],
-    )
-    integerator.load(cpu)
+    settings = common_settings(config, cpu, model, threshold, max_tags)
+    modelinfo, integerator = load_model(settings["model"], settings["cpu"])
     image = Image.open(filename)
-    ratings, tags = integerator.interrogate(image)
-    rating = "none"
-    if modelinfo['ratingsflag']:
-        ratings["none"] = 0.0
-        for key in ratings:
-            if ratings[key] > ratings[rating]:
-                rating = key
-    clipped_tags = []
-
-    for key in tags:
-        if tags[key] > threshold:
-            clipped_tags.append(key)
-    click.echo("rating: " + rating)
-    click.echo("tags: " + ", ".join(clipped_tags))
+    ratings, tag_scores = integerator.interrogate(image)
+    rating, content, _ = build_tags(modelinfo, ratings, tag_scores, settings["threshold"], settings["max_tags"], False)
+    click.echo("rating: " + (rating or "none"))
+    click.echo("tags: " + ", ".join(content))
 
 
 @click.command()
@@ -170,85 +255,48 @@ def evaluate(filename, cpu, model, threshold):
 @click.option("--cpu/--gpu", default=None, help="Run the model on the CPU or the GPU (default: config.yaml, else GPU)")
 @click.option("--model", default=None, help=f"The tagging model folder to use (default: config.yaml, else {DEFAULT_MODEL})")
 @click.option("--threshold", type=float, default=None, help=f"The threshold to drop tags below (default: config.yaml, else {DEFAULT_THRESHOLD})")
+@click.option("--max-tags", type=int, default=None, help=f"Keep at most this many content tags, highest scores first (default: config.yaml, else {hydrus_safety.DEFAULT_MAX_TAGS})")
 @click.option("--host", default=None, help=f"The URL for your Hydrus server (default: config.yaml, else {DEFAULT_HOST})")
 @click.option("--tag-service", default=None, help=f"The local Hydrus tag service to add tags to (default: config.yaml, else '{DEFAULT_TAG_SERVICE}')")
 @click.option("--ratings-only", is_flag=True, default=None, help="Only add the content rating tag (no content tags). Existing tags are never removed")
 @click.option("--privacy/--show-tags", default=None, help="Hide or show the tag output in the console (default: config.yaml, else hide)")
-def evaluate_api(hash, token, cpu, model, threshold, host, tag_service, ratings_only, privacy):
+@click.option("--dry-run", is_flag=True, help="Do everything except write to Hydrus, and print what would be sent")
+@click.option("--allow-my-tags", is_flag=True, help="Allow writing to the built-in 'my tags' service")
+def evaluate_api(hash, token, cpu, model, threshold, max_tags, host, tag_service, ratings_only, privacy, dry_run, allow_my_tags):
+    file_hash = hydrus_safety.normalize_hash(hash)
+    if file_hash is None:
+        raise click.UsageError(f"'{hash}' is not a sha256 hash (64 hex characters)")
     config = load_config()
-    token = resolve(token, "token", None, config)
-    if not token:
-        raise click.UsageError("API token required. Set 'token' in config.yaml or pass --token")
-    cpu = to_bool(resolve(cpu, "cpu", False, config))
-    model = resolve(model, "model", DEFAULT_MODEL, config)
-    threshold = float(resolve(threshold, "threshold", DEFAULT_THRESHOLD, config))
-    host = resolve(host, "host", DEFAULT_HOST, config)
-    tag_service = resolve(tag_service, "tag_service", DEFAULT_TAG_SERVICE, config)
-    ratings_only = to_bool(resolve(ratings_only, "ratings_only", False, config))
-    privacy = to_bool(resolve(privacy, "privacy", True, config))
+    settings = api_settings(config, token, cpu, model, threshold, max_tags, host, tag_service, ratings_only, privacy)
 
-    if not os.path.isfile('./model/' + model + '/info.json'):
-        raise ValueError("info.json not found in model folder!")
+    modelinfo, integerator = load_model(settings["model"], settings["cpu"])
+    if settings["ratings_only"] and not modelinfo['ratingsflag']:
+        raise click.UsageError("--ratings-only set, but model does not support ratings!")
+    client, service = connect(settings, allow_my_tags)
 
-    with open('./model/' + model + '/info.json') as json_f:
-        modelinfo = json.load(json_f)
+    metadata = client.get_file_metadata(hashes=[file_hash], only_return_basic_information=True, include_services_object=False)
+    row, reason = hydrus_safety.metadata_row_for_hash(metadata, file_hash)
+    if row is None:
+        raise click.ClickException(f"Not tagging {file_hash}: {reason}")
 
-    integerator = interrogate.WaifuDiffusionInterrogator(
-        modelinfo['modelname'],
-        modelinfo['modelfile'],
-        modelinfo['tagsfile'],
-        model,
-        modelinfo['ratingsflag'],
-        modelinfo['numberofratings'],
-        repo_id=modelinfo['source'],
-    )
-    integerator.load(cpu)
-    client = hydrus_api.Client(token, host)
-
-    services = client.get_services()
-    service_key = None
-    for key, info in services.get("services", {}).items():
-        if info.get("name") == tag_service:
-            service_key = key
-            break
-    if not service_key:
-        raise ValueError(f"Tag service '{tag_service}' not found")
-
-    image_bytes = BytesIO(client.get_file(hash).content)
+    image_bytes = BytesIO(client.get_file(file_hash).content)
     image = Image.open(image_bytes)
-    ratings, tags = integerator.interrogate(image)
-    rating = "none"
-    if modelinfo['ratingsflag']:
-        ratings["none"] = 0.0
-        for key in ratings:
-            if ratings[key] > ratings[rating]:
-                rating = key
-    clipped_tags = []
+    ratings, tag_scores = integerator.interrogate(image)
+    rating, content, final_tags = build_tags(modelinfo, ratings, tag_scores, settings["threshold"], settings["max_tags"], settings["ratings_only"])
 
-    if not ratings_only:
-        for key in tags:
-            if tags[key] > threshold:
-                clipped_tags.append(key)
+    if not settings["privacy"]:
+        click.echo("rating: " + (rating or "none"))
+        click.echo("tags: " + ", ".join(content))
 
-    if not privacy:
-        click.echo("rating: " + rating)
-        click.echo("tags: " + ", ".join(clipped_tags))
-
-    if modelinfo['ratingsflag']:
-        clipped_tags.append("rating:" + rating)
-    if ratings_only:
-        clipped_tags.append("ratings only " + modelinfo['modelname'] + " ai generated tags")
-    else:
-        clipped_tags.append(modelinfo['modelname'] + " ai generated tags")
-    client.add_tags(hashes=[hash], service_keys_to_tags={
-        service_key: clipped_tags
-    })
-
-
-def debug(msg):
-    """Print a debug line and record it for session.log."""
-    click.echo(msg)
-    interrogate.session_debug.append(msg)
+    if dry_run:
+        click.echo("DRY RUN, nothing written: " + describe_send(file_hash, service, final_tags))
+        return
+    client.add_tags(
+        hashes=[file_hash],
+        service_keys_to_tags={service[0]: final_tags},
+        override_previously_deleted_mappings=False,
+    )
+    click.echo(f"Added {len(final_tags)} tags to {file_hash}")
 
 
 @click.command()
@@ -257,6 +305,7 @@ def debug(msg):
 @click.option("--cpu/--gpu", default=None, help="Run the model on the CPU or the GPU (default: config.yaml, else GPU)")
 @click.option("--model", default=None, help=f"The tagging model folder to use (default: config.yaml, else {DEFAULT_MODEL})")
 @click.option("--threshold", type=float, default=None, help=f"The threshold to drop tags below (default: config.yaml, else {DEFAULT_THRESHOLD})")
+@click.option("--max-tags", type=int, default=None, help=f"Keep at most this many content tags per file, highest scores first (default: config.yaml, else {hydrus_safety.DEFAULT_MAX_TAGS})")
 @click.option("--host", default=None, help=f"The URL for your Hydrus server (default: config.yaml, else {DEFAULT_HOST})")
 @click.option("--tag-service", default=None, help=f"The local Hydrus tag service to add tags to (default: config.yaml, else '{DEFAULT_TAG_SERVICE}')")
 @click.option("--ratings-only", is_flag=True, default=None, help="Only add the content rating tag (no content tags). Existing tags are never removed")
@@ -265,54 +314,36 @@ def debug(msg):
 @click.option("--skip-resume", is_flag=True, help="Ignore any unfinished checkpoint and start a fresh batch")
 @click.option("--skip-tagged", is_flag=True, help="Skip files that already have an AI-generated tags marker")
 @click.option("--limit", type=int, default=None, help="Stop after this many files have been successfully tagged (skips do not count)")
-def evaluate_api_batch(inputfile, token, cpu, model, threshold, host, tag_service, ratings_only, privacy, tags_mode, skip_resume, skip_tagged, limit):
+@click.option("--dry-run", is_flag=True, help="Do everything except write to Hydrus; log what would be sent to dryrun.log")
+@click.option("--allow-my-tags", is_flag=True, help="Allow writing to the built-in 'my tags' service")
+def evaluate_api_batch(inputfile, token, cpu, model, threshold, max_tags, host, tag_service, ratings_only, privacy, tags_mode, skip_resume, skip_tagged, limit, dry_run, allow_my_tags):
     interrogate.session_debug.clear()
     config = load_config()
-    token = resolve(token, "token", None, config)
-    if not token:
-        raise click.UsageError("API token required. Set 'token' in config.yaml or pass --token")
-    cpu = to_bool(resolve(cpu, "cpu", False, config))
-    model = resolve(model, "model", DEFAULT_MODEL, config)
-    threshold = float(resolve(threshold, "threshold", DEFAULT_THRESHOLD, config))
-    host = resolve(host, "host", DEFAULT_HOST, config)
-    tag_service = resolve(tag_service, "tag_service", DEFAULT_TAG_SERVICE, config)
-    ratings_only = to_bool(resolve(ratings_only, "ratings_only", False, config))
-    privacy = to_bool(resolve(privacy, "privacy", True, config))
+    settings = api_settings(config, token, cpu, model, threshold, max_tags, host, tag_service, ratings_only, privacy)
+    threshold = settings["threshold"]
+    max_tags = settings["max_tags"]
+    ratings_only = settings["ratings_only"]
+    privacy = settings["privacy"]
 
     if not os.path.isfile(inputfile):
-        raise ValueError("input file not found!")
-    if not os.path.isfile('./model/' + model + '/info.json'):
-        raise ValueError("info.json not found in model folder!")
+        raise click.UsageError("input file not found!")
 
-    with open('./model/' + model + '/info.json') as json_f:
-        modelinfo = json.load(json_f)
-
+    modelinfo, integerator = load_model(settings["model"], settings["cpu"])
     if ratings_only and not modelinfo['ratingsflag']:
-        raise ValueError("--ratings-only set, but model does not support ratings!")
+        raise click.UsageError("--ratings-only set, but model does not support ratings!")
 
-    integerator = interrogate.WaifuDiffusionInterrogator(
-        modelinfo['modelname'],
-        modelinfo['modelfile'],
-        modelinfo['tagsfile'],
-        model,
-        modelinfo['ratingsflag'],
-        modelinfo['numberofratings'],
-        repo_id=modelinfo['source'],
-    )
-    integerator.load(cpu)
-    client = hydrus_api.Client(token, host)
+    client, service = connect(settings, allow_my_tags)
+    service_key = service[0]
 
-    services = client.get_services()
-    service_key = None
-    for key, info in services.get("services", {}).items():
-        if info.get("name") == tag_service:
-            service_key = key
-            break
-    if not service_key:
-        raise ValueError(f"Tag service '{tag_service}' not found")
-
-    checkpoint_file = "session.log"
-    complete_marker = "session.complete"
+    if dry_run:
+        # A dry run never touches the real checkpoint, so it can't affect resume.
+        checkpoint_file = "dryrun.log"
+        complete_marker = None
+        skip_resume = True
+        debug("DEBUG: --dry-run set; nothing will be written to Hydrus. Results go to dryrun.log")
+    else:
+        checkpoint_file = "session.log"
+        complete_marker = "session.complete"
     resuming = False
     already_done = set()
     hashes = []
@@ -321,7 +352,8 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, host, tag_servic
     # after the search. The log only contains hashes we actually attempted,
     # so we always re-query and then skip anything already in the log.
     if skip_resume:
-        debug("DEBUG: --skip-resume set; starting fresh batch")
+        if not dry_run:
+            debug("DEBUG: --skip-resume set; starting fresh batch")
     elif os.path.isfile(complete_marker):
         debug("DEBUG: previous batch completed; starting fresh")
     elif os.path.isfile(checkpoint_file):
@@ -338,9 +370,9 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, host, tag_servic
                 continue
             # Only real hashes count. Debug lines and comments are ignored.
             candidate = line.split("\t", 1)[0]
-            if re.fullmatch(r"[0-9a-fA-F]{64}", candidate):
+            if hydrus_safety.normalize_hash(candidate) == candidate.lower():
                 hash_lines.append(line)
-        already_done = {line.split("\t", 1)[0] for line in hash_lines}
+        already_done = {line.split("\t", 1)[0].lower() for line in hash_lines}
         ok_count = sum(1 for line in hash_lines if line.endswith("\tOK"))
         done_count = len(already_done)
         if done_count:
@@ -360,7 +392,7 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, host, tag_servic
         debug("DEBUG: no previous batch found; starting fresh")
 
     if hashes is None:
-        hashes = []
+        raw_hashes = []
     elif tags_mode:
         with open(inputfile) as f:
             search_tags = [line.strip() for line in f if line.strip()]
@@ -391,23 +423,32 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, host, tag_servic
                 search_tags.append(negative)
                 debug(f"DEBUG: --skip-tagged set; adding negative search term: {negative}")
         debug(f"DEBUG: Searching Hydrus for tags: {search_tags}")
-        result = client.search_files(tags=search_tags, return_hashes=True)
+        result = client.search_files(tags=search_tags, return_hashes=True, return_file_ids=False)
         if isinstance(result, dict):
-            hashes = result.get("hashes", [])
+            raw_hashes = result.get("hashes", [])
         else:
-            hashes = result
-        debug(f"DEBUG: Found {len(hashes)} files")
+            raw_hashes = result
+        debug(f"DEBUG: Found {len(raw_hashes)} files")
     else:
         with open(inputfile) as hashfile_f:
-            hashes = []
-            for line in hashfile_f:
-                line = line.strip()
-                if not line:
-                    continue
-                # Hydrus copies hashes as "sha256:<hash>". Drop the prefix if present.
-                if line.lower().startswith("sha256:"):
-                    line = line[7:]
-                hashes.append(line.strip())
+            raw_hashes = [line.strip() for line in hashfile_f if line.strip()]
+
+    # Only lowercase 64-hex sha256 hashes go any further. "sha256:" prefixes
+    # are removed, duplicates are dropped, and anything else is reported.
+    hashes = []
+    invalid = []
+    seen = set()
+    for raw in raw_hashes:
+        file_hash = hydrus_safety.normalize_hash(raw)
+        if file_hash is None:
+            invalid.append(raw)
+            continue
+        if file_hash in seen:
+            continue
+        seen.add(file_hash)
+        hashes.append(file_hash)
+    if invalid:
+        debug(f"DEBUG: ignored {len(invalid)} lines that are not sha256 hashes, e.g. {invalid[:3]}")
 
     # Exclude anything already in the log so resume continues cleanly.
     if already_done:
@@ -419,7 +460,7 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, host, tag_servic
     # appended as they are actually processed, so the log never holds
     # unprocessed ones. On resume, append a separator and the new debug.
     if not resuming:
-        if os.path.isfile(complete_marker):
+        if complete_marker and os.path.isfile(complete_marker):
             os.remove(complete_marker)
         debug(f"DEBUG: initialized {checkpoint_file}")
         with open(checkpoint_file, "w") as f:
@@ -482,19 +523,27 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, host, tag_servic
             if not limit:
                 bar.update(1)
             click.echo(" processing: " + hash)
+
+            # Metadata first: it confirms Hydrus really has this exact file
+            # (non-null file_id) before anything is downloaded or written.
+            # Full metadata (with tags) is only needed for --skip-tagged.
             try:
-                file = client.get_file(hash).content
-                metadata = client.get_file_metadata(hashes=[hash])
+                metadata = client.get_file_metadata(
+                    hashes=[hash],
+                    only_return_basic_information=not skip_tagged,
+                    include_services_object=False,
+                )
             except Exception as e:
-                log_result(hash, f"failed to fetch from Hydrus: {e}")
+                log_result(hash, f"failed to fetch metadata from Hydrus: {e}")
                 skipped_count += 1
                 continue
-            if isinstance(metadata, dict) and "metadata" in metadata:
-                file_meta = metadata["metadata"][0] if metadata["metadata"] else None
-            else:
-                file_meta = metadata[0] if metadata else None
-            num_frames = file_meta.get("num_frames") if file_meta else None
-            ext = file_meta.get("ext", "").lower() if file_meta else ""
+            file_meta, reason = hydrus_safety.metadata_row_for_hash(metadata, hash)
+            if file_meta is None:
+                log_result(hash, f"skipped: {reason}")
+                skipped_count += 1
+                continue
+            num_frames = file_meta.get("num_frames")
+            ext = (file_meta.get("ext") or "").lower()
 
             # Skip files that already have this model's AI-generated marker
             if skip_tagged and already_ai_tagged(file_meta):
@@ -508,10 +557,17 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, host, tag_servic
                 skipped_count += 1
                 continue
 
+            try:
+                file = client.get_file(hash).content
+            except Exception as e:
+                log_result(hash, f"failed to fetch from Hydrus: {e}")
+                skipped_count += 1
+                continue
+
             if num_frames is None:
                 try:
                     image = Image.open(BytesIO(file))
-                    ratings, tags = integerator.interrogate(image)
+                    ratings, tag_scores = integerator.interrogate(image)
                     threshold_local = threshold
                 except Exception as e:
                     log_result(hash, f"unsupported file: {e}")
@@ -523,7 +579,7 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, host, tag_servic
                     frames_indexes = np.round(np.linspace(0, num_frames, 7)[1:-1])
                 else:
                     frames_indexes = [np.round(num_frames / 2)]
-                ratings, tags = {}, {}
+                ratings, tag_scores = {}, {}
                 threshold_local = threshold * 2
                 successful_frames = 0
                 try:
@@ -536,7 +592,7 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, host, tag_servic
                                 kwargs = {"index": int(index)}
                                 if plugin:
                                     kwargs["plugin"] = plugin
-                                frame = iio.imread(BytesIO(file), extension=file_meta["ext"], **kwargs)
+                                frame = iio.imread(BytesIO(file), extension=ext, **kwargs)
                                 break
                             except Exception as e:  # noqa: BLE001 - try the next backend
                                 last_error = e
@@ -550,7 +606,7 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, host, tag_servic
                             for r in rate:
                                 ratings[r] = ratings.get(r, 0) + rate[r]
                         for t in tag:
-                            tags[t] = tags.get(t, 0) + tag[t]
+                            tag_scores[t] = tag_scores.get(t, 0) + tag[t]
                         successful_frames += 1
                     if successful_frames == 0:
                         log_result(hash, "failed to decode any frames")
@@ -561,36 +617,31 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, host, tag_servic
                     skipped_count += 1
                     continue
 
-            rating = "none"
-            if modelinfo['ratingsflag']:
-                ratings["none"] = 0.0
-                for key in ratings:
-                    if ratings[key] > ratings[rating]:
-                        rating = key
-            clipped_tags = []
-
-            if not ratings_only:
-                for key in tags:
-                    if tags[key] > threshold_local:
-                        clipped_tags.append(key)
+            rating, content, final_tags = build_tags(modelinfo, ratings, tag_scores, threshold_local, max_tags, ratings_only)
 
             if not privacy:
-                click.echo("rating: " + rating)
-                click.echo("tags: " + ", ".join(clipped_tags))
+                click.echo("rating: " + (rating or "none"))
+                click.echo("tags: " + ", ".join(content))
                 click.echo()
 
-            if modelinfo['ratingsflag']:
-                clipped_tags.append("rating:" + rating)
-            if ratings_only:
-                clipped_tags.append("ratings only " + modelinfo['modelname'] + " ai generated tags")
-            else:
-                clipped_tags.append(modelinfo['modelname'] + " ai generated tags")
+            if dry_run:
+                click.echo(" DRY RUN, nothing written: " + describe_send(hash, service, final_tags))
+                log_result(hash, "DRY RUN\t" + ", ".join(final_tags))
+                tagged_count += 1
+                if limit:
+                    bar.update(1)
+                if limit and tagged_count >= limit:
+                    debug(f"DEBUG: reached --limit {limit}; stopping")
+                    break
+                continue
 
             # Write tags to Hydrus, then record the hash so we can resume later
             try:
-                client.add_tags(hashes=[hash], service_keys_to_tags={
-                    service_key: clipped_tags
-                })
+                client.add_tags(
+                    hashes=[hash],
+                    service_keys_to_tags={service_key: final_tags},
+                    override_previously_deleted_mappings=False,
+                )
                 # Only mark as done after a successful write
                 log_result(hash, "OK")
                 tagged_count += 1
@@ -603,6 +654,10 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, host, tag_servic
                 log_result(hash, f"failed to add tags: {e}")
                 skipped_count += 1
                 continue
+
+    if dry_run:
+        debug(f"DEBUG: dry run complete — {tagged_count} files would be tagged, {skipped_count} skipped — see {checkpoint_file}")
+        return
 
     # Batch finished cleanly. Strip the OK status from successful lines so the
     # log is a clean hash list for copy-paste. Failures keep their reason.
