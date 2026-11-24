@@ -10,7 +10,7 @@ import numpy as np
 import yaml
 from PIL import Image, ImageFile
 
-from . import hydrus_safety, interrogate
+from . import hydrus_safety, interrogate, resume_check
 from .hydrus_safety import SafetyError
 
 Image.MAX_IMAGE_PIXELS = None
@@ -331,13 +331,6 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, max_tags, host, 
     if not os.path.isfile(inputfile):
         raise click.UsageError("input file not found!")
 
-    modelinfo, integerator = load_model(settings["model"], settings["cpu"])
-    if ratings_only and not modelinfo['ratingsflag']:
-        raise click.UsageError("--ratings-only set, but model does not support ratings!")
-
-    client, service = connect(settings, allow_my_tags)
-    service_key = service[0]
-
     if dry_run:
         # A dry run never touches the real checkpoint, so it can't affect resume.
         checkpoint_file = "dryrun.log"
@@ -350,6 +343,13 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, max_tags, host, 
     resuming = False
     already_done = set()
     hashes = []
+    # What this run will do. Written as the first line of a fresh session.log
+    # and compared on resume, so a resume can't mix models, inputs or targets.
+    current_run = resume_check.run_settings(
+        settings["model"], inputfile, tags_mode, ratings_only,
+        settings["tag_service_key"] or settings["tag_service"],
+        threshold, max_tags, skip_tagged,
+    )
 
     # Resume check loads what was already processed so we can exclude it
     # after the search. The log only contains hashes we actually attempted,
@@ -364,7 +364,11 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, max_tags, host, 
             lines = [line.rstrip("\n") for line in f if line.strip()]
         stored_limit = None
         hash_lines = []
+        header = None
         for line in lines:
+            if line.startswith(resume_check.HEADER_PREFIX):
+                header = line
+                continue
             if line.startswith("#limit:"):
                 try:
                     stored_limit = int(line.split(":", 1)[1])
@@ -379,6 +383,22 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, max_tags, host, 
         ok_count = sum(1 for line in hash_lines if line.endswith("\tOK"))
         done_count = len(already_done)
         if done_count:
+            # Refuse to resume if the unfinished batch used other settings.
+            # This happens before the model loads or Hydrus is contacted.
+            if header is None:
+                click.echo(f"Warning: {checkpoint_file} has no run-settings line (made by an older version), so the resume can't be checked. Resuming as before.", err=True)
+            else:
+                try:
+                    hard, soft = resume_check.compare(resume_check.parse_header(header), current_run)
+                except ValueError:
+                    hard, soft = [("run-settings line", "unreadable", "")], []
+                if hard:
+                    click.echo(resume_check.mismatch_message(hard, checkpoint_file), err=True)
+                    # Exit code 0 on purpose: repeat-run.bat retries on any
+                    # error, which would repeat this refusal forever.
+                    click.get_current_context().exit(0)
+                if soft:
+                    click.echo(resume_check.soft_message(soft), err=True)
             resuming = True
             if stored_limit is not None:
                 remaining_limit = max(0, stored_limit - ok_count)
@@ -393,6 +413,13 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, max_tags, host, 
             debug("DEBUG: checkpoint empty; starting fresh")
     else:
         debug("DEBUG: no previous batch found; starting fresh")
+
+    modelinfo, integerator = load_model(settings["model"], settings["cpu"])
+    if ratings_only and not modelinfo['ratingsflag']:
+        raise click.UsageError("--ratings-only set, but model does not support ratings!")
+
+    client, service = connect(settings, allow_my_tags)
+    service_key = service[0]
 
     if hashes is None:
         raw_hashes = []
@@ -467,6 +494,8 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, max_tags, host, 
             os.remove(complete_marker)
         debug(f"DEBUG: initialized {checkpoint_file}")
         with open(checkpoint_file, "w") as f:
+            if not dry_run:
+                f.write(resume_check.header_line(current_run) + "\n")
             for line in interrogate.session_debug:
                 f.write(line + "\n")
             if limit:
