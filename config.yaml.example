@@ -13,3 +13,12 @@ tag_service: "A.I. Tags"
 cpu: true
 ratings_only: false
 privacy: true
+
+## Optional safety settings
+# Pin the tag service by its key instead of its name (find it in Hydrus under
+# services > review services, or in the error message if the name is ambiguous)
+# tag_service_key: ""
+# Most content tags written per file (highest scores first)
+# max_tags: 150
+# Seconds to wait for Hydrus to answer before giving up
+# request_timeout: 600

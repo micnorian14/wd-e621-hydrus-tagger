@@ -7,8 +7,11 @@ config.yaml
 session.log
 session.complete
 hashes.batch.complete
+dryrun.log
 # Locally downloaded model files (keep only info.json and readme.txt)
 model/*/*
 !model/*/info.json
 !model/*/readme.txt
 model/wd-eva02-tagger-2026-canary-onnx-v2/
+# Your own config, bat files and models
+local/
