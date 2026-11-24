@@ -20,6 +20,21 @@ from PIL import Image
 from . import console, dbimutils, onnx_loader
 
 tag_escape_pattern = re.compile(r'([\\()])')
+
+CHANNELS_FIRST_MESSAGE = (
+    "This model uses a channels-first input layout, which is not supported yet. "
+    "Support is TBD. Please choose a supported model."
+)
+
+
+def check_input_layout(shape):
+    """Refuse channels-first models (input [batch, 3, height, width], e.g. canary).
+
+    The image code below only handles channels-last input [batch, height, width, 3].
+    """
+    if len(shape) == 4 and shape[1] == 3 and shape[3] != 3:
+        raise click.ClickException(CHANNELS_FIRST_MESSAGE)
+
 use_cpu = True
 
 if use_cpu:
@@ -97,6 +112,9 @@ class WaifuDiffusionInterrogator:
             debug("DEBUG: InferenceSession failed!")
             click.echo(repr(e))
             raise
+
+        # Stop before anything is sent to Hydrus if the model's layout isn't supported.
+        check_input_layout(self.model.get_inputs()[0].shape)
 
         # Read every column as plain text so tag names like "nan" or "none"
         # are never turned into empty values.

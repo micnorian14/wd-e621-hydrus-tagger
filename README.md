@@ -19,6 +19,8 @@ If the root folder (the folder this .md file is in) has moved or has been rename
 ## DOWNLOADING THE MODELS:
 This edit of the tool uses local copies of the models instead of downloading them from the internet when it runs. This means you will need to download the models yourself. Each folder in the `model` folder has a .txt file that says where to get that model and which files you need (usually `model.onnx` and `selected_tags.csv`).
 
+Channels-first models, such as the WD EVA02 2026 Canary ONNX export, aren't supported yet. If you pick one, the tool stops with a message right after loading the model, before contacting Hydrus. Support is TBD.
+
 ## INFO.JSON:
 In the pre-made model folders are info.json files. These tell the tagger which tagging model is being loaded and what it can do. This is important for certain functions such as tagging only the content rating (safe, explicit, etc.). If you want to use a new model that doesn't have a folder by default, make a new folder with the model's .onnx and .csv file in it, then create an info.json with the correct info for it.
 
