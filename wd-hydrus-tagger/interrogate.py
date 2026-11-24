@@ -92,7 +92,9 @@ class WaifuDiffusionInterrogator:
             click.echo(repr(e))
             raise
 
-        self.tags = pd.read_csv(tags_file)
+        # Read every column as plain text so tag names like "nan" or "none"
+        # are never turned into empty values.
+        self.tags = pd.read_csv(tags_file, keep_default_na=False, dtype=str)
         debug("DEBUG: tags CSV loaded")
 
     def interrogate(
