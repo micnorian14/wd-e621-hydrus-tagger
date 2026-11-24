@@ -1091,6 +1091,7 @@ cli.add_command(evaluate_api_batch)
 
 if __name__ == '__main__':
     console.install_error_colors()
+    console.install_quiet_interrupts()
     Image.init()
     ImageFile.LOAD_TRUNCATED_IMAGES = True
     cli(args=upgrade_legacy_bool_args(sys.argv[1:]), prog_name="python -m wd-hydrus-tagger")

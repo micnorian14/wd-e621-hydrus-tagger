@@ -20,7 +20,7 @@ verbose = False
 # green, yellow and red, numbers in bold cyan like Rich's highlighter, and
 # times in bright yellow. Plain ANSI codes, so no extra package is needed.
 RESET = "\x1b[0m"
-BLUE = "\x1b[34m"
+BLUE = "\x1b[94m"  # bright blue; plain blue (34) is too dark on a black cmd window
 GREEN = "\x1b[32m"
 YELLOW = "\x1b[33m"
 RED = "\x1b[31m"
@@ -104,6 +104,26 @@ def success(text):
 
 def warn(text, err=False):
     click.echo(paint(text, YELLOW, err=err), err=err)
+
+
+def install_quiet_interrupts():
+    """Don't print "Exception ignored in ... __del__" noise after Ctrl+C.
+
+    When Ctrl+C lands while a video is being read, imageio's reader is cleaned
+    up later and Python reports the KeyboardInterrupt again as an "ignored"
+    error. Only that case is silenced; any other ignored error still shows.
+    """
+    previous = sys.unraisablehook
+    if getattr(previous, "_quiet_interrupts", False):
+        return
+
+    def hook(unraisable):
+        if isinstance(unraisable.exc_value, KeyboardInterrupt):
+            return
+        previous(unraisable)
+
+    hook._quiet_interrupts = True
+    sys.unraisablehook = hook
 
 
 def install_error_colors():
