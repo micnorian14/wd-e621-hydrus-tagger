@@ -1,5 +1,5 @@
 """Run-settings line for session.log, so a resume can't continue a batch
-with a different model, input file or target.
+with a different model, input mode or target.
 
 The first line of a fresh session.log looks like:
     #run: {"input_name": "tags.txt", "input_sha256": "...", "mode": "tags", ...}
@@ -11,18 +11,18 @@ import os
 HEADER_PREFIX = "#run: "
 HEADER_VERSION = 1
 
-# Changing any of these mid-batch changes which files get processed or what
-# gets written, so a resume with a different value is refused.
+# Changing any of these mid-batch would mix two kinds of tagging in one batch
+# (other model, other target, ratings vs all tags), so a resume is refused.
 HARD_FIELDS = {
     "model": "model folder",
-    "mode": "input mode (--tags or hashes)",
-    "input_sha256": "input file contents",
-    "ratings_only": "--ratings-only",
+    "mode": "input mode (tags or hashes)",
+    "ratings_only": "ratings only",
     "tag_service": "tag service",
 }
-# These only change how many tags a file gets, so a difference is reported
-# and the resume continues.
+# These are fine to change mid-batch: files already done stay done and the rest
+# use the new value. A difference is reported and the resume continues.
 SOFT_FIELDS = {
+    "input_sha256": "input file contents",
     "input_name": "input file name",
     "threshold": "threshold",
     "max_tags": "max tags",
@@ -80,16 +80,16 @@ def compare(old, new):
 def mismatch_message(hard, checkpoint_file):
     lines = [f"Resume stopped: the unfinished {checkpoint_file} was started with different settings."]
     for label, old, new in hard:
-        if label == "input file contents":
-            lines.append(f"  - {label}: the file has changed since that batch started")
-        else:
-            lines.append(f"  - {label}: was {old!r}, now {new!r}")
+        lines.append(f"  - {label}: was {old!r}, now {new!r}")
     lines.append("Nothing was sent to Hydrus.")
-    lines.append("To finish that batch, run the bat file you started it with again.")
+    lines.append("To finish that batch, change these back (config.yaml or flags) and run again.")
     lines.append(f"To start a new batch instead, add --skip-resume (this replaces {checkpoint_file}).")
     return "\n".join(lines)
 
 
 def soft_message(soft):
-    parts = [f"{label} was {old!r}, now {new!r}" for label, old, new in soft]
+    parts = [
+        "input file contents changed" if label == "input file contents" else f"{label} was {old!r}, now {new!r}"
+        for label, old, new in soft
+    ]
     return "Note: resuming with changed settings (" + "; ".join(parts) + ")"
