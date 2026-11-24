@@ -1,0 +1,20 @@
+# Copy this file to input.txt and put what you want tagged in it.
+# Lines starting with # are ignored, and so are blank lines.
+#
+# The file holds ONE of these two kinds of lines. The tagger works out
+# which one you used (or set "mode: tags" / "mode: hashes" in config.yaml).
+#
+# 1) Hydrus search tags, one per line. A file must match all of them,
+#    just like a search page in Hydrus. For example:
+#
+#      system:filetype is image
+#      system:limit is 500
+#      -wd v1.4 vit tagger v2 ai generated tags
+#
+# 2) File hashes (sha256), one per line. In Hydrus: select files, then
+#    right-click > share > copy > hashes > sha256. For example:
+#
+#      0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+#
+# Remove the # in front of the line below (or replace it with your own).
+# system:filetype is image

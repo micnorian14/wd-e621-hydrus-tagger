@@ -8,6 +8,8 @@ session.log
 session.complete
 hashes.batch.complete
 dryrun.log
+# Your own list of what to tag (see input.txt.example)
+input.txt
 # Locally downloaded model files (keep only info.json and readme.txt)
 model/*/*
 !model/*/info.json

@@ -1,1 +1,0 @@
-python -m wd-hydrus-tagger evaluate-api-batch --model wd-eva02-large-tagger-v3 hashes.txt --skip-tagged --limit 64

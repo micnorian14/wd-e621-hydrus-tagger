@@ -1,1 +1,0 @@
-python -m wd-hydrus-tagger evaluate-api-batch --model Z3D-E621-Convnext hashes.txt --skip-tagged --limit 64

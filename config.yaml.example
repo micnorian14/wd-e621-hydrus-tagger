@@ -1,24 +1,62 @@
-## Example config for wd-e621-hydrus-tagger
-# CLI flags always override these settings.
-# Required for any Hydrus API commands
+## Settings for wd-e621-hydrus-tagger
+# Copy this file to config.yaml (in the same folder as run.bat) and put
+# your Hydrus access key in "token". That is the only setting you must set.
+#
+# The values below are the built-in defaults, so you only need to change
+# the ones you want different. A line starting with # is a comment and is
+# ignored; remove the # to use that setting.
+#
+# Flags typed after the command (or in a bat file) win over this file for
+# that one run, for example: run.bat --limit 10
 
-## Paste your hydrus API token below
+## Connecting to Hydrus
+# Your Hydrus Client API access key. In Hydrus: services > review services
+# > local > client api. Keep it private.
 token: YOUR_HYDRUS_API_TOKEN_HERE
-
-## Optional flags — these are the defaults
+# Address of the Hydrus Client API.
 host: "http://127.0.0.1:45869"
-model: "wd-eva02-large-tagger-v3"
-threshold: 0.6
-tag_service: "A.I. Tags"
-cpu: true
-ratings_only: false
-privacy: true
+# How many seconds to wait for Hydrus to answer before giving up.
+request_timeout: 600
 
-## Optional safety settings
-# Pin the tag service by its key instead of its name (find it in Hydrus under
-# services > review services, or in the error message if the name is ambiguous)
+## Where the tags go
+# Name of the local tag service in Hydrus that gets the tags.
+tag_service: "A.I. Tags"
+# Optional: pick the tag service by its key instead of its name (needed if
+# two services have the same name; the error message shows the keys).
 # tag_service_key: ""
-# Most content tags written per file (highest scores first)
-# max_tags: 150
-# Seconds to wait for Hydrus to answer before giving up
-# request_timeout: 600
+
+## What to tag
+# The text file that lists what to tag: either Hydrus search tags or file
+# hashes, one per line (see input.txt.example). Dropping a text file onto
+# run.bat uses that file instead.
+input: input.txt
+# How to read that file: auto (works it out from the lines), tags or hashes.
+mode: auto
+# Stop after this many files have been tagged. 0 means no limit.
+limit: 0
+# true = skip files this model has already tagged.
+skip_tagged: false
+# true = do everything except write to Hydrus; what would be sent goes to
+# dryrun.log. dry-run.bat does this for one run without changing this file.
+dry_run: false
+# true = if the batch crashes (for example Hydrus stops answering), wait a
+# little and carry on where it left off. It stops by itself if the same
+# problem keeps happening before any file gets done.
+retry: false
+
+## The tagging model
+# Folder name inside the model folder.
+model: "wd-v1-4-vit-tagger-v2"
+# Lowest score (from 0 to 1) a tag needs to be kept. Higher = fewer tags.
+threshold: 0.35
+# Most content tags added to one file (the best-scoring ones are kept).
+max_tags: 150
+# true = run the model on the processor (slower). false = use the graphics
+# card, falling back to the processor if it can't.
+cpu: false
+# true = only add the rating tag (like rating:general), no content tags.
+ratings_only: false
+
+## Console output
+# true = don't print the tags in the console window. false = print them.
+privacy: true
