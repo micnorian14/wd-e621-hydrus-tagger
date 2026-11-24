@@ -6,12 +6,117 @@ With --verbose (or "verbose: true" in config.yaml) every DEBUG line and a
 line per file are shown too. Nothing here changes what goes into
 session.log or dryrun.log.
 """
+import os
+import re
 import shutil
+import sys
 import time
 
 import click
 
 verbose = False
+
+# Colours (display only), matching hydrus-video-deduplicator: Rich's blue,
+# green, yellow and red, numbers in bold cyan like Rich's highlighter, and
+# times in bright yellow. Plain ANSI codes, so no extra package is needed.
+RESET = "\x1b[0m"
+BLUE = "\x1b[34m"
+GREEN = "\x1b[32m"
+YELLOW = "\x1b[33m"
+RED = "\x1b[31m"
+CYAN = "\x1b[1;36m"
+BRIGHT_YELLOW = "\x1b[93m"
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+# Numbers and quoted text, as Rich's ReprHighlighter colours them.
+_HIGHLIGHT_RE = re.compile(r"(?P<str>'[^']*')|(?P<number>(?<![\w.])-?[0-9]+\.?[0-9]*\b)")
+
+force_color = None  # tests set True/False; None = decide from the console
+_vt_ok = None
+
+
+def _enable_windows_vt():
+    """Turn on ANSI colour support in the Windows console (Windows 10+)."""
+    global _vt_ok
+    if _vt_ok is None:
+        _vt_ok = True
+        if os.name == "nt":
+            try:
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                for handle_id in (-11, -12):  # stdout, stderr
+                    handle = kernel32.GetStdHandle(handle_id)
+                    mode = ctypes.c_uint32()
+                    if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                        continue
+                    if not kernel32.SetConsoleMode(handle, mode.value | 0x0004):
+                        _vt_ok = False
+            except (AttributeError, OSError):
+                _vt_ok = False
+    return _vt_ok
+
+
+def color_enabled(stream=None, err=False):
+    """Colours only in a real console, and never when NO_COLOR is set."""
+    if force_color is not None:
+        return force_color
+    if "NO_COLOR" in os.environ or os.environ.get("TERM") == "dumb":
+        return False
+    if stream is None:
+        stream = sys.stderr if err else sys.stdout
+    isatty = getattr(stream, "isatty", None)
+    if not (isatty and isatty()):
+        return False
+    return _enable_windows_vt()
+
+
+def strip_ansi(text):
+    return ANSI_RE.sub("", text)
+
+
+def paint(text, color, err=False, stream=None):
+    """Whole text in one colour (or plain, if colours are off)."""
+    if not color_enabled(stream, err):
+        return text
+    return f"{color}{text}{RESET}"
+
+
+def highlight(text, base, err=False, stream=None):
+    """Text in a base colour, with numbers bold cyan and quoted text green."""
+    if not color_enabled(stream, err):
+        return text
+    out, pos = [base], 0
+    for m in _HIGHLIGHT_RE.finditer(text):
+        out.append(text[pos:m.start()])
+        out.append((GREEN if m.group("str") else CYAN) + m.group(0) + RESET + base)
+        pos = m.end()
+    out.append(text[pos:] + RESET)
+    return "".join(out)
+
+
+def info(label, value):
+    """A startup line: blue label, highlighted value."""
+    click.echo(highlight(f"{label:<8} {value}", BLUE))
+
+
+def success(text):
+    click.echo(highlight(text, GREEN))
+
+
+def warn(text, err=False):
+    click.echo(paint(text, YELLOW, err=err), err=err)
+
+
+def install_error_colors():
+    """Show click's "Error: ..." messages in red. Called once at startup."""
+    original = click.ClickException.format_message
+    if getattr(original, "_red", False):
+        return
+
+    def red_message(self):
+        return paint(original(self), RED, err=True)
+
+    red_message._red = True
+    click.ClickException.format_message = red_message
 
 
 def set_verbose(value):
@@ -82,7 +187,7 @@ class Progress:
     def position(self):
         return self.counts["tagged"] if self.count_tagged_only else self.done
 
-    def line(self, width):
+    def line(self, width, color=False):
         pos = self.position()
         if self.total:
             pos = min(pos, self.total)
@@ -99,12 +204,27 @@ class Progress:
             counts += f" fail {self.counts['failed']}"
         info = f"{pos}/{self.total} {int(fraction * 100)}% | {counts} | {timing}"
         bar_width = min(30, width - len(self.label) - len(info) - 4)
+        filled = int(bar_width * fraction) if bar_width >= 6 else 0
         if bar_width >= 6:
-            filled = int(bar_width * fraction)
             text = f"{self.label} [{'#' * filled}{'-' * (bar_width - filled)}] {info}"
         else:
             text = f"{self.label} {info}"
-        return text[:width]
+        if len(text) > width or not color:
+            return text[:width]
+        # Same text with colours added; the visible width doesn't change.
+        c = {"tagged": GREEN, "skipped": YELLOW, "failed": RED}
+        counts = f"ok {c['tagged']}{self.counts['tagged']}{RESET}"
+        if self.counts["skipped"]:
+            counts += f" skip {c['skipped']}{self.counts['skipped']}{RESET}"
+        if self.counts["failed"]:
+            counts += f" fail {c['failed']}{self.counts['failed']}{RESET}"
+        timing = re.sub(r"\d+:\d\d(:\d\d)?", lambda m: BRIGHT_YELLOW + m.group(0) + RESET, timing)
+        info = (f"{CYAN}{pos}{RESET}/{CYAN}{self.total}{RESET} {CYAN}{int(fraction * 100)}%{RESET}"
+                f" | {counts} | {timing}")
+        if bar_width >= 6:
+            bar = f"{GREEN}{'#' * filled}{RESET}{'-' * (bar_width - filled)}"
+            return f"{self.label} [{bar}] {info}"
+        return f"{self.label} {info}"
 
     def draw(self, force=False):
         if not self.interactive:
@@ -113,11 +233,12 @@ class Progress:
         if not force and self._last_draw is not None and now - self._last_draw < self.min_interval:
             return
         self._last_draw = now
-        text = self.line(self.width or console_width())
-        padding = " " * max(0, self._last_len - len(text))
+        text = self.line(self.width or console_width(), color=color_enabled(self.stream))
+        visible = len(strip_ansi(text))
+        padding = " " * max(0, self._last_len - visible)
         self.stream.write("\r" + text + padding)
         self.stream.flush()
-        self._last_len = len(text)
+        self._last_len = visible
         self._drawn = True
 
     def _clear(self):

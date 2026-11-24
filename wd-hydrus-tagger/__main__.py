@@ -39,7 +39,7 @@ def load_config(path="config.yaml"):
                 data = yaml.safe_load(f)
                 return data if isinstance(data, dict) else {}
         except Exception as e:
-            click.echo(f"Warning: could not load {path}: {e}", err=True)
+            console.warn(f"Warning: could not load {path}: {e}", err=True)
     return {}
 
 
@@ -259,7 +259,7 @@ def common_settings(config, cpu, model, threshold, max_tags):
     except SafetyError as e:
         raise click.UsageError(str(e)) from None
     if warning:
-        click.echo(warning, err=True)
+        console.warn(warning, err=True)
     return settings
 
 
@@ -555,6 +555,12 @@ def run_batch_command(**kwargs):
         try:
             run_batch(settings, settings["skip_resume"] and not state["log_started"], state)
             return
+        except KeyboardInterrupt:
+            if settings["dry_run"]:
+                console.warn("Interrupted. Dry run results so far are in dryrun.log.", err=True)
+            else:
+                console.warn("Interrupted. Progress so far is saved in session.log; run again to carry on.", err=True)
+            raise
         except NO_RETRY:
             raise
         except Exception as e:
@@ -573,7 +579,7 @@ def run_batch_command(**kwargs):
                     f"Last error: {describe_error(e)}"
                 ) from e
             wait = min(RETRY_FIRST_WAIT * 2 ** (failures_in_a_row - 1), RETRY_MAX_WAIT)
-            click.echo(
+            console.warn(
                 f"[{time.strftime('%H:%M:%S')}] The batch stopped with an error: {describe_error(e)}\n"
                 f"Retrying in {wait} seconds ({failures_in_a_row} of {RETRY_MAX_IN_A_ROW - 1} retries in a row). Press Ctrl+C to stop.",
                 err=True,
@@ -600,7 +606,7 @@ def run_batch(settings, skip_resume, state):
     if not state["announced"]:
         state["announced"] = True
         lines_word = "line" if len(settings["entries"]) == 1 else "lines"
-        click.echo(f"Input:   {inputfile} ({'search tags' if tags_mode else 'file hashes'}, {len(settings['entries'])} {lines_word})")
+        console.info("Input:", f"{inputfile} ({'search tags' if tags_mode else 'file hashes'}, {len(settings['entries'])} {lines_word})")
         options = []
         if dry_run:
             options.append("DRY RUN (nothing is written to Hydrus)")
@@ -613,7 +619,7 @@ def run_batch(settings, skip_resume, state):
         if settings["retry"] and not dry_run:
             options.append("retry on")
         if options:
-            click.echo("Options: " + ", ".join(options))
+            console.info("Options:", ", ".join(options))
     resume_note = None
 
     if dry_run:
@@ -671,7 +677,7 @@ def run_batch(settings, skip_resume, state):
             # Refuse to resume if the unfinished batch used other settings.
             # This happens before the model loads or Hydrus is contacted.
             if header is None:
-                click.echo(f"Warning: {checkpoint_file} has no run-settings line (made by an older version), so the resume can't be checked. Resuming as before.", err=True)
+                console.warn(f"Warning: {checkpoint_file} has no run-settings line (made by an older version), so the resume can't be checked. Resuming as before.", err=True)
             else:
                 try:
                     hard, soft = resume_check.compare(resume_check.parse_header(header), current_run)
@@ -680,7 +686,7 @@ def run_batch(settings, skip_resume, state):
                 if hard:
                     raise ResumeRefused(resume_check.mismatch_message(hard, checkpoint_file))
                 if soft:
-                    click.echo(resume_check.soft_message(soft), err=True)
+                    console.warn(resume_check.soft_message(soft), err=True)
             resuming = True
             if stored_limit is not None:
                 remaining_limit = max(0, stored_limit - ok_count)
@@ -704,20 +710,20 @@ def run_batch(settings, skip_resume, state):
         modelinfo, integerator = state["model"][1]
     else:
         if resume_note:
-            click.echo(f"Resume:  {resume_note}")
+            console.info("Resume:", resume_note)
             resume_note = None
-        click.echo(f"Loading model {settings['model']} ...")
+        click.echo(console.paint(f"Loading model {settings['model']} ...", console.BLUE))
         modelinfo, integerator = load_model(settings["model"], settings["cpu"])
         state["model"] = (model_key, (modelinfo, integerator))
-        click.echo(f"Model:   {settings['model']} on {provider_name(integerator, settings['cpu'])}")
+        console.info("Model:", f"{settings['model']} on {provider_name(integerator, settings['cpu'])}")
     if resume_note:
-        click.echo(f"Resume:  {resume_note}")
+        console.info("Resume:", resume_note)
     if ratings_only and not modelinfo['ratingsflag']:
         raise click.UsageError("--ratings-only set, but model does not support ratings!")
 
     client, service = connect(settings, allow_my_tags)
     service_key = service[0]
-    click.echo(f"Target:  {describe_service(service)}")
+    console.info("Target:", describe_service(service))
 
     if hashes is None:
         raw_hashes = []
@@ -782,12 +788,12 @@ def run_batch(settings, skip_resume, state):
         hashes = [h for h in hashes if h not in already_done]
         debug(f"DEBUG: excluded {before - len(hashes)} already-logged hashes; {len(hashes)} candidates remaining")
     files_word = "file" if found_count == 1 else "files"
-    found_text = f"Found:   {found_count} {files_word}"
+    found_text = f"{found_count} {files_word}"
     if found_count != len(hashes):
         found_text += f", {found_count - len(hashes)} already done, {len(hashes)} to go"
     if invalid:
         found_text += f" ({len(invalid)} lines that aren't hashes ignored)"
-    click.echo(found_text)
+    console.info("Found:", found_text)
 
     # Fresh batch: write the debug block, then the limit header. Hashes are
     # appended as they are actually processed, so the log never holds
@@ -851,24 +857,24 @@ def run_batch(settings, skip_resume, state):
             width = console.console_width() - 12
             if len(short) > width:
                 short = short[:max(0, width - 3)] + "..."
-            progress.message(f"  {console.short_hash(hash_value)}  {short}")
+            progress.message(console.paint(f"  {console.short_hash(hash_value)}  {short}", console.YELLOW, stream=progress.stream))
 
     def summary():
         took = console.duration(time.monotonic() - started)
         counts = progress.counts
         done_word = "would be tagged" if dry_run else "tagged"
-        click.echo(
+        console.success(
             f"{'Dry run done' if dry_run else 'Done'} in {took}: {counts['tagged']} {done_word}, "
             f"{counts['skipped']} skipped, {counts['failed']} failed."
         )
         if hit_limit:
-            click.echo(f"Stopped at the limit of {limit} tagged files.")
+            console.success(f"Stopped at the limit of {limit} tagged files.")
         if frames_unread:
-            click.echo(f"{frames_unread} video frames could not be read (use --verbose to see them).")
+            console.warn(f"{frames_unread} video frames could not be read (use --verbose to see them).")
         if dry_run:
-            click.echo(f"Nothing was written to Hydrus. Details: {checkpoint_file}")
+            console.success(f"Nothing was written to Hydrus. Details: {checkpoint_file}")
         else:
-            click.echo(f"Details: {checkpoint_file}")
+            console.success(f"Details: {checkpoint_file}")
 
     tagged_count = 0
     skipped_count = 0
@@ -1084,6 +1090,7 @@ cli.add_command(evaluate_api_batch)
 
 
 if __name__ == '__main__':
+    console.install_error_colors()
     Image.init()
     ImageFile.LOAD_TRUNCATED_IMAGES = True
     cli(args=upgrade_legacy_bool_args(sys.argv[1:]), prog_name="python -m wd-hydrus-tagger")
