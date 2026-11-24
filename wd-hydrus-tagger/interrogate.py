@@ -8,14 +8,16 @@ import pandas as pd
 session_debug = []
 
 def debug(msg):
-    click.echo(msg)
+    # Always kept for session.log; only shown in the console with --verbose.
+    if console.verbose:
+        click.echo(msg)
     session_debug.append(msg)
 
 from pathlib import Path
 
 from PIL import Image
 
-from . import dbimutils, onnx_loader
+from . import console, dbimutils, onnx_loader
 
 tag_escape_pattern = re.compile(r'([\\()])')
 use_cpu = True
@@ -72,6 +74,9 @@ class WaifuDiffusionInterrogator:
         try:
             import onnxruntime
             debug(f"DEBUG: onnxruntime imported, version = {onnxruntime.__version__}")
+            if not console.verbose:
+                # Hide onnxruntime's own warnings; errors still show.
+                onnxruntime.set_default_logger_severity(3)
             InferenceSession = onnxruntime.InferenceSession
             debug("DEBUG: InferenceSession obtained")
         except Exception as e:
@@ -86,7 +91,8 @@ class WaifuDiffusionInterrogator:
 
         try:
             self.model = InferenceSession(str(model_file), providers=providers)
-            click.echo(f'DEBUG: Loaded {self.name} model from {model_file}')
+            if console.verbose:
+                click.echo(f'DEBUG: Loaded {self.name} model from {model_file}')
         except Exception as e:
             debug("DEBUG: InferenceSession failed!")
             click.echo(repr(e))

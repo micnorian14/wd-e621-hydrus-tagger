@@ -11,7 +11,7 @@ import numpy as np
 import yaml
 from PIL import Image, ImageFile
 
-from . import hydrus_safety, interrogate, resume_check
+from . import console, hydrus_safety, interrogate, resume_check
 from .hydrus_safety import SafetyError
 
 Image.MAX_IMAGE_PIXELS = None
@@ -192,8 +192,9 @@ kaomojis = [
 
 
 def debug(msg):
-    """Print a debug line and record it for session.log."""
-    click.echo(msg)
+    """Record a debug line for session.log; print it only with --verbose."""
+    if console.verbose:
+        click.echo(msg)
     interrogate.session_debug.append(msg)
 
 
@@ -216,6 +217,31 @@ def load_model(model, cpu):
     )
     integerator.load(cpu)
     return modelinfo, integerator
+
+
+def apply_verbose(verbose, config):
+    console.set_verbose(to_bool(resolve(verbose, "verbose", False, config)))
+
+
+SERVICE_TYPES = {5: "local tag service", 0: "tag repository", 10: "all known tags"}
+
+
+def describe_service(service):
+    """'name' (local tag service). The key is only shown in full with --verbose."""
+    kind = SERVICE_TYPES.get(service[2], f"type {service[2]}")
+    if console.verbose:
+        return f"'{service[1]}' ({kind}, key {service[0]})"
+    return f"'{service[1]}' ({kind})"
+
+
+def provider_name(integerator, cpu):
+    """What the model really runs on, as onnxruntime reports it."""
+    get_providers = getattr(getattr(integerator, "model", None), "get_providers", None)
+    if get_providers is None:
+        return "CPU" if cpu else "GPU"
+    if "CUDAExecutionProvider" in get_providers():
+        return "GPU (CUDA)"
+    return "CPU" if cpu else "CPU (GPU not available)"
 
 
 def common_settings(config, cpu, model, threshold, max_tags):
@@ -300,7 +326,7 @@ def build_tags(modelinfo, ratings, tag_scores, threshold, max_tags, ratings_only
 
 
 def describe_send(file_hash, service, final_tags, show_tags=True):
-    text = f"{file_hash} -> '{service[1]}' ({service[0]}, type {service[2]}): {len(final_tags)} tags"
+    text = f"{file_hash} -> {describe_service(service)}: {len(final_tags)} tags"
     if show_tags:
         text += ": " + ", ".join(final_tags)
     return text
@@ -349,8 +375,9 @@ HELP = {
     "max_tags": f"Most content tags per file, best scores first. [config: max_tags, default {hydrus_safety.DEFAULT_MAX_TAGS}]",
     "cpu": "Run the model on the processor or the graphics card (GPU falls back to CPU if unavailable). [config: cpu, default --gpu]",
     "ratings_only": "Only add the rating tag, no content tags. Existing tags are never removed. [config: ratings_only, default off]",
-    "privacy": "Hide or show the tags in the console. [config: privacy, default --privacy]",
+    "privacy": "Hide or show each file's tags in the console. [config: privacy, default --privacy]",
     "allow_my_tags": "Allow writing to Hydrus's built-in 'my tags' service (blocked by default).",
+    "verbose": "Show every detail: DEBUG lines, one line per file, full service key. [config: verbose, default off]",
 }
 
 
@@ -360,9 +387,11 @@ HELP = {
 @click.option("--threshold", type=float, default=None, help=HELP["threshold"])
 @click.option("--max-tags", type=int, default=None, help=HELP["max_tags"])
 @click.option("--cpu/--gpu", default=None, help=HELP["cpu"])
-def evaluate(filename, cpu, model, threshold, max_tags):
+@click.option("--verbose/--no-verbose", default=None, help=HELP["verbose"])
+def evaluate(filename, cpu, model, threshold, max_tags, verbose):
     """Tag one image file on disk and print the tags. Nothing is sent to Hydrus."""
     config = load_config()
+    apply_verbose(verbose, config)
     settings = common_settings(config, cpu, model, threshold, max_tags)
     modelinfo, integerator = load_model(settings["model"], settings["cpu"])
     image = Image.open(filename)
@@ -385,12 +414,14 @@ def evaluate(filename, cpu, model, threshold, max_tags):
 @click.option("--privacy/--show-tags", default=None, help=HELP["privacy"])
 @click.option("--dry-run", is_flag=True, help="Do everything except write to Hydrus, and print what would be sent.")
 @click.option("--allow-my-tags", is_flag=True, help=HELP["allow_my_tags"])
-def evaluate_api(hash, token, cpu, model, threshold, max_tags, host, tag_service, ratings_only, privacy, dry_run, allow_my_tags):
+@click.option("--verbose/--no-verbose", default=None, help=HELP["verbose"])
+def evaluate_api(hash, token, cpu, model, threshold, max_tags, host, tag_service, ratings_only, privacy, dry_run, allow_my_tags, verbose):
     """Tag one file in Hydrus, given its sha256 hash."""
     file_hash = hydrus_safety.normalize_hash(hash)
     if file_hash is None:
         raise click.UsageError(f"'{hash}' is not a sha256 hash (64 hex characters)")
     config = load_config()
+    apply_verbose(verbose, config)
     settings = api_settings(config, token, cpu, model, threshold, max_tags, host, tag_service, ratings_only, privacy)
 
     modelinfo, integerator = load_model(settings["model"], settings["cpu"])
@@ -443,6 +474,7 @@ BATCH_PARAMS = [
     click.option("--cpu/--gpu", default=None, help=HELP["cpu"]),
     click.option("--privacy/--show-tags", default=None, help=HELP["privacy"]),
     click.option("--allow-my-tags", is_flag=True, help=HELP["allow_my_tags"]),
+    click.option("--verbose/--no-verbose", default=None, help=HELP["verbose"]),
 ]
 
 
@@ -476,9 +508,10 @@ def evaluate_api_batch(**kwargs):
 
 
 def batch_settings(config, input_path, mode, tags_flag, model, threshold, max_tags, limit, skip_tagged,
-                   ratings_only, dry_run, retry, skip_resume, token, host, tag_service, cpu, privacy, allow_my_tags):
+                   ratings_only, dry_run, retry, skip_resume, token, host, tag_service, cpu, privacy, allow_my_tags, verbose):
     """Every batch setting, from flags first, then config.yaml, then defaults.
     Also reads the input file, so mistakes stop the run before Hydrus is contacted."""
+    apply_verbose(verbose, config)
     settings = api_settings(config, token, cpu, model, threshold, max_tags, host, tag_service, ratings_only, privacy)
 
     if tags_flag:
@@ -515,7 +548,7 @@ def run_batch_command(**kwargs):
     settings = batch_settings(config, **kwargs)
     # Shared between attempts: how many files have been finished, whether this
     # run already started its own session.log, and the loaded model.
-    state = {"files_done": 0, "log_started": False, "model": None}
+    state = {"files_done": 0, "log_started": False, "model": None, "announced": False}
     failures_in_a_row = 0
     while True:
         files_before = state["files_done"]
@@ -563,6 +596,25 @@ def run_batch(settings, skip_resume, state):
     dry_run = settings["dry_run"]
     allow_my_tags = settings["allow_my_tags"]
     debug(f"DEBUG: reading {inputfile} as {'search tags' if tags_mode else 'hashes'} ({len(settings['entries'])} lines)")
+    started = time.monotonic()
+    if not state["announced"]:
+        state["announced"] = True
+        lines_word = "line" if len(settings["entries"]) == 1 else "lines"
+        click.echo(f"Input:   {inputfile} ({'search tags' if tags_mode else 'file hashes'}, {len(settings['entries'])} {lines_word})")
+        options = []
+        if dry_run:
+            options.append("DRY RUN (nothing is written to Hydrus)")
+        if ratings_only:
+            options.append("ratings only")
+        if skip_tagged:
+            options.append("skip tagged")
+        if limit:
+            options.append(f"limit {limit}")
+        if settings["retry"] and not dry_run:
+            options.append("retry on")
+        if options:
+            click.echo("Options: " + ", ".join(options))
+    resume_note = None
 
     if dry_run:
         # A dry run never touches the real checkpoint, so it can't affect resume.
@@ -634,11 +686,13 @@ def run_batch(settings, skip_resume, state):
                 remaining_limit = max(0, stored_limit - ok_count)
                 limit = remaining_limit
                 debug(f"DEBUG: unfinished batch found — resuming with {done_count} done ({ok_count} OK), {remaining_limit} left of original limit {stored_limit}")
+                resume_note = f"carrying on the unfinished batch in {checkpoint_file} ({done_count} done, {remaining_limit} left of the limit of {stored_limit})"
                 if remaining_limit == 0:
                     debug("DEBUG: original limit already reached; nothing to do")
                     hashes = None  # sentinel: skip search and processing
             else:
                 debug(f"DEBUG: unfinished batch found — resuming with {done_count} done")
+                resume_note = f"carrying on the unfinished batch in {checkpoint_file} ({done_count} done)"
         else:
             debug("DEBUG: checkpoint empty; starting fresh")
     else:
@@ -649,13 +703,21 @@ def run_batch(settings, skip_resume, state):
     if state.get("model") and state["model"][0] == model_key:
         modelinfo, integerator = state["model"][1]
     else:
+        if resume_note:
+            click.echo(f"Resume:  {resume_note}")
+            resume_note = None
+        click.echo(f"Loading model {settings['model']} ...")
         modelinfo, integerator = load_model(settings["model"], settings["cpu"])
         state["model"] = (model_key, (modelinfo, integerator))
+        click.echo(f"Model:   {settings['model']} on {provider_name(integerator, settings['cpu'])}")
+    if resume_note:
+        click.echo(f"Resume:  {resume_note}")
     if ratings_only and not modelinfo['ratingsflag']:
         raise click.UsageError("--ratings-only set, but model does not support ratings!")
 
     client, service = connect(settings, allow_my_tags)
     service_key = service[0]
+    click.echo(f"Target:  {describe_service(service)}")
 
     if hashes is None:
         raw_hashes = []
@@ -714,10 +776,18 @@ def run_batch(settings, skip_resume, state):
         debug(f"DEBUG: ignored {len(invalid)} lines that are not sha256 hashes, e.g. {invalid[:3]}")
 
     # Exclude anything already in the log so resume continues cleanly.
+    found_count = len(hashes)
     if already_done:
         before = len(hashes)
         hashes = [h for h in hashes if h not in already_done]
         debug(f"DEBUG: excluded {before - len(hashes)} already-logged hashes; {len(hashes)} candidates remaining")
+    files_word = "file" if found_count == 1 else "files"
+    found_text = f"Found:   {found_count} {files_word}"
+    if found_count != len(hashes):
+        found_text += f", {found_count - len(hashes)} already done, {len(hashes)} to go"
+    if invalid:
+        found_text += f" ({len(invalid)} lines that aren't hashes ignored)"
+    click.echo(found_text)
 
     # Fresh batch: write the debug block, then the limit header. Hashes are
     # appended as they are actually processed, so the log never holds
@@ -742,6 +812,21 @@ def run_batch(settings, skip_resume, state):
             for line in interrogate.session_debug:
                 f.write(line + "\n")
 
+    # One progress bar for the whole batch. With --limit it counts tagged
+    # files toward the limit, otherwise every file.
+    progress = console.Progress(
+        limit if limit else len(hashes),
+        label="Dry run" if dry_run else "Tagging",
+        count_tagged_only=bool(limit),
+    )
+    frames_unread = 0
+    hit_limit = False
+
+    def detail(msg):
+        """A per-file line, only shown with --verbose."""
+        if console.verbose:
+            progress.message(msg)
+
     # Append a processed hash to the log. status is "OK" or a failure reason.
     def log_result(hash_value, status):
         try:
@@ -750,6 +835,40 @@ def run_batch(settings, skip_resume, state):
             state["files_done"] += 1
         except Exception as e:
             debug(f"DEBUG: failed to update checkpoint for {hash_value}: {e}")
+        # Console only: count it, and show a short line for real problems.
+        if status == "OK" or status.startswith("DRY RUN"):
+            progress.update("tagged")
+            return
+        if status == "already ai-tagged" or status.startswith("unsupported format"):
+            progress.update("skipped")
+            detail(f"  {hash_value}: {status}")
+            return
+        progress.update("skipped" if status.startswith("skipped:") else "failed")
+        if console.verbose:
+            progress.message(f"  {hash_value}: {status}")
+        else:
+            short = " ".join(status.split())
+            width = console.console_width() - 12
+            if len(short) > width:
+                short = short[:max(0, width - 3)] + "..."
+            progress.message(f"  {console.short_hash(hash_value)}  {short}")
+
+    def summary():
+        took = console.duration(time.monotonic() - started)
+        counts = progress.counts
+        done_word = "would be tagged" if dry_run else "tagged"
+        click.echo(
+            f"{'Dry run done' if dry_run else 'Done'} in {took}: {counts['tagged']} {done_word}, "
+            f"{counts['skipped']} skipped, {counts['failed']} failed."
+        )
+        if hit_limit:
+            click.echo(f"Stopped at the limit of {limit} tagged files.")
+        if frames_unread:
+            click.echo(f"{frames_unread} video frames could not be read (use --verbose to see them).")
+        if dry_run:
+            click.echo(f"Nothing was written to Hydrus. Details: {checkpoint_file}")
+        else:
+            click.echo(f"Details: {checkpoint_file}")
 
     tagged_count = 0
     skipped_count = 0
@@ -781,17 +900,9 @@ def run_batch(settings, skip_resume, state):
                 return True
         return False
 
-    # When --limit is set, the bar tracks successful tags against that limit.
-    # Otherwise it tracks the full hash list and moves on every file.
-    if limit:
-        bar = click.progressbar(length=limit)
-    else:
-        bar = click.progressbar(length=len(hashes))
-    with bar:
+    with progress:
         for hash in hashes:
-            if not limit:
-                bar.update(1)
-            click.echo(" processing: " + hash)
+            detail(" processing: " + hash)
 
             # Metadata first: it confirms Hydrus really has this exact file
             # (non-null file_id) before anything is downloaded or written.
@@ -875,7 +986,8 @@ def run_batch(settings, skip_resume, state):
                                 last_error = e
                                 continue
                         if frame is None:
-                            click.echo(f"  could not read frame {int(index)} of {hash}: {last_error}")
+                            frames_unread += 1
+                            detail(f"  could not read frame {int(index)} of {hash}: {last_error}")
                             continue
                         image = Image.fromarray(frame)
                         rate, tag = integerator.interrogate(image)
@@ -897,18 +1009,20 @@ def run_batch(settings, skip_resume, state):
             rating, content, final_tags = build_tags(modelinfo, ratings, tag_scores, threshold_local, max_tags, ratings_only)
 
             if not privacy:
-                click.echo("rating: " + (rating or "none"))
-                click.echo("tags: " + ", ".join(content))
-                click.echo()
+                if console.verbose:
+                    progress.message("rating: " + (rating or "none"))
+                    progress.message("tags: " + ", ".join(content))
+                    progress.message("")
+                else:
+                    progress.message(f"  {console.short_hash(hash)}  rating: {rating or 'none'} | tags: {', '.join(content)}")
 
             if dry_run:
-                click.echo(" DRY RUN, nothing written: " + describe_send(hash, service, final_tags, not privacy))
+                detail(" DRY RUN, nothing written: " + describe_send(hash, service, final_tags, not privacy))
                 log_result(hash, "DRY RUN\t" + ", ".join(final_tags))
                 tagged_count += 1
-                if limit:
-                    bar.update(1)
                 if limit and tagged_count >= limit:
                     debug(f"DEBUG: reached --limit {limit}; stopping")
+                    hit_limit = True
                     break
                 continue
 
@@ -922,10 +1036,9 @@ def run_batch(settings, skip_resume, state):
                 # Only mark as done after a successful write
                 log_result(hash, "OK")
                 tagged_count += 1
-                if limit:
-                    bar.update(1)
                 if limit and tagged_count >= limit:
                     debug(f"DEBUG: reached --limit {limit}; stopping")
+                    hit_limit = True
                     break
             except CONNECTION_ERRORS:
                 # Hydrus is gone or busy: stop the batch (and retry, if on)
@@ -938,6 +1051,7 @@ def run_batch(settings, skip_resume, state):
 
     if dry_run:
         debug(f"DEBUG: dry run complete — {tagged_count} files would be tagged, {skipped_count} skipped — see {checkpoint_file}")
+        summary()
         return
 
     # Batch finished cleanly. Strip the OK status from successful lines so the
@@ -960,6 +1074,7 @@ def run_batch(settings, skip_resume, state):
     # Mark the batch as finished so the next launch starts fresh by default.
     with open(complete_marker, "w") as f:
         f.write(f"tagged={tagged_count} skipped={skipped_count}\n")
+    summary()
 
 
 cli.add_command(run_cmd)
