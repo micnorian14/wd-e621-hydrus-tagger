@@ -1,8 +1,9 @@
-# README-ORIGINAL.md is here for legacy purposes. It's information is quite outdated. See below for up-to-date help.
+# README-ORIGINAL.md is here for legacy purposes. Its information is quite outdated. See below for up-to-date help.
 
-If the root folder (the folder this .md file is in) has moved or has been renamed, delete the venv folder if it exists and follow first time installation instructions.
+If the root folder (the folder this .md file is in) has moved or has been renamed, delete the venv folder if it exists and follow the first time installation instructions.
 
 ## REQUIREMENTS:
+* Windows 10 or later (other systems may work but aren't tested)
 * Python 3.11.x or 3.12.x
 * Git 2.45.2 or later
 * Hydrus Network with API key
@@ -10,15 +11,16 @@ If the root folder (the folder this .md file is in) has moved or has been rename
 
 
 ## FOR FIRST TIME INSTALLATION:
-1. Open the root folder (folder with this .md file) in cmd and run "python -m venv venv" without quotes
-2. Run `start.bat` in your command line to open the venv
-3. Type "pip install -r requirements.txt" and press enter
+1. Open the root folder (folder with this .md file) in cmd and run `python -m venv venv`
+2. Run `venv\Scripts\pip install -r requirements.txt`
+
+`run.bat` and `dry-run.bat` use the `venv` folder automatically, so there's no need to activate it yourself.
 
 ## DOWNLOADING THE MODELS:
-This edit of the tool specifically uses local downloads of the model instead of cache downloads from the internet. This means you will need to download the models yourself. You can find the models by navigating to their specific folder in the models folder and reading the .txt file.
+This edit of the tool uses local copies of the models instead of downloading them from the internet when it runs. This means you will need to download the models yourself. Each folder in the `model` folder has a .txt file that says where to get that model and which files you need (usually `model.onnx` and `selected_tags.csv`).
 
 ## INFO.JSON:
-In the three pre-made model folders are info.json files. These inform the tagger of what tagging model is being loaded as well as what it's capabilities are. This is important for certain functions such as tagging only the content rating (safe, explicit, etc.) If you want to use new models that don't have a folder created by default, all you need to do is make a new folder with the new model's .onnx and .csv file in it, then create an info.json with the correct info for it.
+In the pre-made model folders are info.json files. These tell the tagger which tagging model is being loaded and what it can do. This is important for certain functions such as tagging only the content rating (safe, explicit, etc.). If you want to use a new model that doesn't have a folder by default, make a new folder with the model's .onnx and .csv file in it, then create an info.json with the correct info for it.
 
 ## HYDRUS PREPARATION:
 1. In Hydrus, navigate to services > manage services
@@ -26,14 +28,14 @@ In the three pre-made model folders are info.json files. These inform the tagger
 3. Name your service "A.I. Tags" (or whatever you want)
 4. Click apply, then click apply in manage services
 5. Now navigate to services > review services
-6. Nagivate to local > client api
+6. Navigate to local > client api
 7. Click "add", select "manually"
 8. Name the new api something identifiable like "AI tagging API"
 9. Click the check box next to the "edit file tags" and "search and fetch files" permissions
 10. Click apply, you can close review services now as well
 
 While optional, it's recommended to migrate tag parents and tag siblings from the PTR to the new tag service to ensure consistent tag naming, as well as more detailed tagging.
-to do so:
+To do so:
 
 1. Navigate to tags > migrate tags
 2. Under content, select "tag parents"
@@ -49,176 +51,150 @@ to do so:
    - `tag_service` defaults to "A.I. Tags". If you named your tag service something else, change it here.
    - config.yaml is git-ignored, so your token stays on your PC and won't be committed.
 
-All other settings (host, model, threshold, tag_service, cpu, ratings_only, privacy) are optional and have sensible defaults.
-CLI flags always override values from the config file.
+Every setting is explained in `config.yaml.example`, and the values in it are the defaults. The ones you're most likely to change:
 
-## .BAT FILE PREPARATIONS:
-There are several .bat files: `start.bat`, `run_wd_hashes.bat`, `run_wd_tags.bat`, `run_e621_hashes.bat`, `run_e621_tags.bat`, and `run_wd_ratings.bat`. `start.bat` should not need to be edited.
-The .bat files no longer contain your API token — that is in config.yaml now.
-You can still override model, tags mode, etc. directly in the .bat files if you want different defaults per script.
-The premade .bat files currently point at the wd-eva02-large-tagger-v3 model. You still need to download the model files into the corresponding folder; the .bat files only select which model to use.
+| Setting | What it does | Default |
+|---|---|---|
+| `input` | The text file that lists what to tag | `input.txt` |
+| `mode` | `auto`, `tags` or `hashes` (how to read the input file) | `auto` |
+| `model` | Model folder inside `model` | `wd-v1-4-vit-tagger-v2` |
+| `threshold` | Lowest score (0 to 1) a tag needs to be kept | `0.35` |
+| `limit` | Stop after this many files are tagged. 0 = no limit | `0` |
+| `skip_tagged` | Skip files this model has already tagged | `false` |
+| `dry_run` | Do everything except write to Hydrus | `false` |
+| `retry` | Carry on by itself after a crash (see below) | `false` |
+| `verbose` | Show every detail in the console | `false` |
+| `tag_service` | Name of the local tag service to write to | `A.I. Tags` |
+| `tag_service_key` | Pick the tag service by key instead (if two have the same name) | not set |
+| `max_tags` | Most content tags added to one file | `150` |
+| `request_timeout` | Seconds to wait for Hydrus to answer | `600` |
+| `cpu` | `true` = run the model on the processor, `false` = graphics card | `false` |
 
-# Now you should be prepared and ready to start automatically tagging files. 
-I recommend starting with a single file or a small group of files, and testing `run_wd_tags.bat`, `run_e621_hashes.bat`, and `run_wd_ratings.bat` individually. Make sure the tags are being put into your AI tagging service, that tag siblings/parents are displaying correctly, and that the file is properly tagged as being AI tagged. If all is well, you can proceed to mass tagging.
+Flags typed after the command (or after `run.bat`) override config.yaml for that one run, for example `run.bat --limit 10`.
 
-## (OPTIONAL) CONVENIENCE CHANGE:
-1. In the folder this .md file is in, navigate to venv\Scripts\
-2. Open `activate.bat` in a text editor
-3. At the bottom of the file, add "cmd /k" to a new line
-   
-You can now double-click `start.bat` to automatically open the venv.
+## .BAT FILES:
+There are two .bat files, and they are identical except for one flag:
+- `run.bat` tags the files listed in your input file.
+- `dry-run.bat` does everything except write tags to Hydrus. What would have been sent goes to `dryrun.log`.
+
+Both read config.yaml, so you shouldn't need to edit them. You can also drag a text file onto either one to use that file instead of the `input` setting.
+
+# Now you should be prepared and ready to start automatically tagging files.
+I recommend starting with `dry-run.bat` and a small batch (for example `limit: 10`, or a search with `system:limit is 10`), then a real run on that same small batch. Make sure the tags are being put into your AI tagging service, that tag siblings/parents are displaying correctly, and that the file is properly tagged as being AI tagged. If all is well, you can proceed to mass tagging.
 
 ## (OPTIONAL) ENABLING GPU USE:
-The program does not have GPU utilization capability by default due to the necessary files having to be sourced from elsewhere. To enable GPU use for windows installations:
-1. Install [CUDA 11.8](https://developer.nvidia.com/cuda-11-8-0-download-archive). You only need the runtime libraries, and you can uncheck the other install options. Alternatively, just do the express installation.
-2. add "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8\bin" to your Windows PATH environment variable. There are several guides online on how to do this, it isn't that hard.
-3. download the [cuDNN 8.9.2 for CUDA 11.x](https://developer.nvidia.com/rdp/cudnn-archive) windows archive, and extract it to a safe location. I recommend putting the folders from the archive in "C:\Program Files\NVIDIA\CUDNN\v8.9.2", as this matches where Nvidia installs cuDNN when installed through an automatic installer.
-4. add "C:\Program Files\NVIDIA\CUDNN\v8.9.2\bin" to your Windows PATH environment variable.
-5. Download [zlib123dllx64.zip](https://forums.developer.nvidia.com/uploads/short-url/e76PYqafTHaGM1XQhQumCSL4vqb.zip) and extract the files to a temporary location
-6. copy zlibwapi.dll from inside the dll_x64 folder, and place it inside the "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8\bin" folder.
+`requirements.txt` installs onnxruntime-gpu, but it needs NVIDIA's CUDA and cuDNN libraries to actually use the graphics card. Without them the tool still works on the processor, just slower. When a batch starts, the console shows which one is in use: `GPU (CUDA)` or `CPU (GPU not available)`.
 
-With all this done, you should be able to utilize the GPU when tagging. To enable GPU utilization, set the CPU option to 0. I recommend testing just as you would on a first install, with a small amount of test hashes. There's chance of an error, but from my experience this doesn't necessarily mean the GPU isn't being utilized. Really, just take the ETA time when CPU is set to 1 and compare to when it's set to 0, and see if it's noticeably faster. If so, then the GPU is being utilized.
+The current models, such as [wd-eva02-large-tagger-v3](https://huggingface.co/SmilingWolf/wd-eva02-large-tagger-v3) or [wd-swinv2-tagger-v3](https://huggingface.co/SmilingWolf/wd-swinv2-tagger-v3), need CUDA 12.x and cuDNN 9.x.
 
-### Additional note on enabling GPU use with latest tagging models
-To enable GPU use for *wd-v3* SmilingWolf models, such as [wd-eva02-large-tagger-v3](https://huggingface.co/SmilingWolf/wd-eva02-large-tagger-v3) or [wd-swinv2-tagger-v3](https://huggingface.co/SmilingWolf/wd-swinv2-tagger-v3) you will need to use updated versions of CUDA (12.x) and cuDNN (9.x).
+> [!WARNING]
+> This was tested with CUDA 12.6.3 and cuDNN 9.5.1. For other versions, check the [onnxruntime requirements table](https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html#requirements) to find a combination that matches your onnxruntime-gpu version.
 
-> [!WARNING] 
-> This was tested with Python 3.11.9; CUDA 12.6.3; cuDNN 9.5.1; onnxruntime-gpu 1.20.1
->
-> If you willing to test it with other 12.x CUDA and 9.x cuDNN installations please refer to [onnxruntime dependencies table](https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html#requirements)
-
-- Install [CUDA Toolkit 12.6.3](https://developer.nvidia.com/cuda-toolkit-archive); as said above, you only need runtime libraries, so please uncheck other install options if you want to reduce the size of installation.
-- Check if CUDA installer properly added binaries to your Windows PATH:
+- Install [CUDA Toolkit 12.6.3](https://developer.nvidia.com/cuda-toolkit-archive). You only need the runtime libraries, so you can uncheck the other install options to keep the installation small.
+- Check that the CUDA installer added these folders to your Windows PATH:
 	- `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin`
-  	- and `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\libnvvp`
-- Install [cuDNN 9.5.1](https://developer.nvidia.com/cudnn-archive); by default cuDNN install libraries for both CUDA 11.8 and CUDA 12.6, you can uncheck 11.8 if you don't need it.
-	- **VERY IMPORTANT!** The installer automatically adds only `\bin\` folder to your Windows PATH which is incorrect!
-	- To make it correct you need to edit the Windows PATH variable to according to CUDA version you are using, so it should look like this `C:\Program Files\NVIDIA\CUDNN\v9.5\bin\12.6` please **double check** this PATH to avoid issues.
-- Additionally make sure that you have all possible **Visual C++ Redistributables** installed on your system, decent source for all-in-one package can be found [here](https://github.com/abbodi1406/vcredist) if you don't want to install each one of them manually.
-- After you make sure that PATH variables are correct you can utilize your GPU for tagging. If you followed the initial preparation/setup steps correctly — refer to the instructions below on how to add different models. Once you edited your `.bat` to use `--cpu 0` it should automatically install latest onnxruntime-gpu to your venv on the first run.
+	- `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\libnvvp`
+- Install [cuDNN 9.5.1](https://developer.nvidia.com/cudnn-archive). By default it installs libraries for both CUDA 11.8 and CUDA 12.6; you can uncheck 11.8 if you don't need it.
+	- **VERY IMPORTANT!** The installer adds only the `\bin\` folder to your Windows PATH, which is incorrect!
+	- Edit the Windows PATH variable to match your CUDA version, so it looks like `C:\Program Files\NVIDIA\CUDNN\v9.5\bin\12.6`. Please **double check** this to avoid issues.
+- Make sure you have the **Visual C++ Redistributables** installed. A decent all-in-one package can be found [here](https://github.com/abbodi1406/vcredist) if you don't want to install each one manually.
+- `cpu: false` (the default) uses the graphics card when it can.
 
 ## FOR NORMAL USE:
-1. Open command line in the root folder and type `start.bat` or double-click if the convenience change has been made
-2. With Hydrus OPEN:
-	- a. Copy a list of sha256 hashes from Hydrus (right click on file, navigate to share > copy > hash/hashes > sha256)
-	- b. Paste list into `hashes.txt`
-      - (the `sha256:` prefix is now ignored automatically. You no longer need to remove it by hand. Plain hashes still work so as not to break anyone's existing workflow.)
-3. Run `run_wd_hashes.bat` for general tagging, or run_e621_hashes.bat for furry art
-4. (optional) Run `run_wd_ratings.bat` to get ratings tags only, with no content tags
-
-### Processing by Tags (`--tags`)
-Alternatively, you can process files by Hydrus search tags instead of manually exporting hashes.
-1. Create a `tags.txt` file containing Hydrus search tags (one per line).
-2. Run the tool with the `--tags` flag and point it at `tags.txt` instead of `hashes.txt`.
-3. The tool will query Hydrus for all matching files and process them.
-	- Tags are ANDed together (a file must match all of them). System predicates such as `system:filetype is image` or `system:limit=500` work the same way they do in the Hydrus client. The original `hashes.txt` workflow still works if you omit the `--tags` flag.
-	- Example `tags.txt`:
+1. Keep Hydrus OPEN.
+2. Put what you want tagged in `input.txt` (copy `input.txt.example` to start). Use one of these, one per line:
+	- **Hydrus search tags**, like a search page in Hydrus. A file must match all of them. System predicates work the same way they do in the Hydrus client. For example:
 		`creator:some_artist`
 		`system:filetype is image`
+	- **File hashes**. In Hydrus, right click on files and navigate to share > copy > hash/hashes > sha256, then paste. The `sha256:` prefix is ignored automatically.
+3. Run `dry-run.bat` to check, then `run.bat`.
 
-### Skipping already-tagged files (`--skip-tagged`)
-When you pass `--skip-tagged` together with `--tags`, the tool automatically adds a negative search term for the current model’s AI marker (for example `-wd eva02 large tagger v3 ai generated tags`). Hydrus excludes those files from the results, so the tool never receives, queues, or logs them. The marker is read from the selected model’s `info.json`, so it works for any model you have installed. A post-fetch check still exists as a fallback for hash-file mode.
+The tool works out by itself whether the file holds tags or hashes. Blank lines and lines starting with `#` are ignored. If a file mixes both kinds, it stops and asks you to set `mode: tags` or `mode: hashes`.
 
-- The `--skip-tagged` flag only excludes files tagged by the model you are currently running. If you previously tagged files with a different model (for example `wd-v1-4-vit-tagger-v2`), those files carry a different marker and will not be skipped. To exclude them as well, add the inverse of the old marker to your `tags.txt` file: `-wd v1.4 vit tagger v2 ai generated tags`
-- You can find the exact marker string in the old model’s info.json (modelname field). Add one inverse line per model you want to skip.
+Every tagged file also gets a `rating:...` tag (if the model has ratings) and a marker tag naming the model, like `wd v1.4 vit v2 tagger ai generated tags`, so you can find or skip AI-tagged files later.
 
-### Stopping after N successful tags (`--limit`)
-`--limit` is optional. If you leave it off, there is no limit — the tool processes every file Hydrus returns for the search.
-If you set `--limit N`, the tool stops after N files have been successfully tagged. Files that are skipped do not count toward that number.
-When `--limit` is set and your `tags.txt` does not already contain a `system:limit`, the tool adds one for you (`system:limit is N*20`). This keeps Hydrus from returning the entire database when you only want a small batch. If you already put a `system:limit` in `tags.txt`, that one is kept and no extra cap is added. To process everything, omit `--limit` and do not put a `system:limit` in `tags.txt`.
+### Skipping already-tagged files (`skip_tagged`)
+With search tags, the tool adds a negative search term for the current model's marker (for example `-wd eva02 large tagger v3 ai generated tags`), so Hydrus never returns those files. With hashes, each file is checked before it's tagged. The marker comes from the selected model's `info.json`, so it works for any model you have installed.
 
-### Session log and resume function
-Every instance writes a session log in the root folder:
-- `session.log` contains a printout of the initialization debug lines so you can see exactly what step of initialization fails. Then it prints all the hashes that Hydrus reports can be processed. During processing: each hash is appended with a status like OK, FAILED, SKIPPED, UNSUPPORTED, UNABLE TO DECODE, etc. On a clean exit (not a crash/termination) each hash that was successfully tagged OK has that status removed. This presents the bare SHA256 hash per line. Excellent for copy-and-pasting. Any hashes that were skipped for any reason (failed download, failed write, etc.), will still have that reason appended to them so you can troubleshoot those hashes. These are typically either corrupted files or files with an incorrect system:filetype tag. 
-- Every instance checks for a `session.complete` file in the root folder to determine if the last session exited cleanly or not. If not; it uses the `session.log` file as a checkpoint for resuming where the last hashes were marked with OK status. If `session.complete` is present then it assumes the last session exited cleanly and will start a new `session.log` file. 
-- `--skip-resume` flag will ignore the checkpoint and start a clean session should you ever need it. 
+- This only skips files tagged by the model you are currently running. To also skip files tagged by an older model, add the inverse of its marker to your input file, for example `-wd v1.4 vit v2 tagger ai generated tags`. You can find the marker in that model's info.json (the modelname field).
+
+### Stopping after N tagged files (`limit`)
+`limit` stops the batch after that many files have been tagged. Skipped files don't count. If your search has no `system:limit`, the tool adds one (`system:limit is N*20`) so Hydrus doesn't return the entire database when you only want a small batch. If you already put a `system:limit` in your search, that one is kept.
+
+### Session log and resume
+- `session.log` in the root folder lists every file the batch has handled, each with a status (OK, or the reason it was skipped or failed). When the batch finishes cleanly, the OK statuses are removed, leaving bare hashes, which is handy for copy-and-pasting. Files that were skipped or failed keep their reason so you can look into them. These are typically corrupted files or files with an incorrect filetype.
+- If a batch stops part way (closed window, Ctrl+C, crash, power cut), the next run carries on where it left off. A `session.complete` file marks a batch that finished, so the next run starts fresh.
+- Before carrying on, the tool checks that the model, mode (tags or hashes), `ratings_only` and tag service are the same as when the batch started. If they're not, it stops without contacting Hydrus and tells you what changed, so one batch never mixes two kinds of tagging. Changing the input file, threshold or limit is fine; it just prints a note.
+- `--skip-resume` ignores an unfinished batch and starts a new one.
+- Dry runs use `dryrun.log` and never touch `session.log`.
+
+### Retry (`retry`)
+With `retry: true`, if the batch crashes (for example Hydrus stops answering or is restarted), the tool waits and carries on from `session.log`. It waits 3 seconds, then 6, 12 and so on, up to 60 seconds between tries. It gives up after 8 failures in a row with no file finished in between, so an error that happens every time can't loop forever. It never retries after Ctrl+C, a setup mistake, a safety check or during a dry run.
+
+### Stopping with Ctrl+C
+Ctrl+C stops the batch. Everything finished so far is saved in `session.log`, and the next run carries on from there.
 
 ### Video and animated files
-Multi-frame files (video, GIF, etc.) are sampled rather than tagged as a single image. Up to five frames are taken from across the file, each is tagged, and the scores are combined. The threshold is raised for these files so weak tags do not survive. Flash files (`.swf`, `.fla`, `.flash`) are excluded — they cannot be decoded. `av` is required for video decoding and is listed in `requirements.txt`. Thanks to Assamber (PR #10) for this feature!
+Multi-frame files (video, GIF, etc.) are sampled rather than tagged as a single image. Up to five frames are taken from across the file and tagged, and the scores are added together. A tag has to score more than twice your threshold across those frames to be kept, so videos usually get fewer tags. If you want more (but possibly less accurate) tags for videos, lower your threshold. Frames are decoded on the processor with `av` (listed in `requirements.txt`). Flash files (`.swf`, `.fla`, `.flash`) are excluded automatically since they can't be decoded. Thanks to Assamber (PR #10) for this feature!
+
+### Safety checks
+- Tags only go to a **local** tag service. The built-in "my tags" service is refused unless you add `--allow-my-tags`, and tag repositories such as the PTR are never written to.
+- Tags you deleted from a file in Hydrus are not added back.
+- A file is only tagged if Hydrus really has it.
+- Model tags that contain a colon, like `re:zero`, are sent so Hydrus keeps them whole instead of reading the first part as a namespace.
+- At most `max_tags` content tags (150 by default) are added to one file, best scores first.
+- Your API token is never printed or written to the logs.
+
+### The console
+By default the console shows a few lines about the run, one progress bar with counts and time left, a short line for each file that had a problem, and a summary at the end. Colours: blue for the startup lines, yellow for problems and notices, red for errors, green for the summary. There are no colours when the output goes to a file or `NO_COLOR` is set. For every detail (debug lines, one line per file), use `--verbose` or `verbose: true`. `privacy: false` also prints each file's tags.
 
 ## Running in CLI
+`run.bat` runs `python -m wd-hydrus-tagger`. With no command, that runs a batch using config.yaml. Every setting can also be given as a flag. To see all of them:
+```bash
+python -m wd-hydrus-tagger --help
+```
+
 ### Evaluate a file
+Tags one image on disk and prints the tags. Nothing is sent to Hydrus.
 ```bash
 python -m wd-hydrus-tagger evaluate /path/to/file
-```
-#### Options:
-```
-  --cpu BOOLEAN      Use CPU instead of GPU
-  --model TEXT       The tagging model folder to use
-  --threshold FLOAT  The threshhold to drop tags below
 ```
 
 ### Evaluate a file in Hydrus
 ```bash
 python -m wd-hydrus-tagger evaluate-api 123_your_files_hash_456
 ```
-#### Options:
-```
-  --cpu BOOLEAN       Use CPU instead of GPU
-  --model TEXT        The tagging model folder to use
-  --threshold FLOAT   The threshhold to drop tags below
-  --host TEXT         The URL for your Hydrus server
-  --tag-service TEXT  The tag service to send tags that match the threshold to
-  --ratings-only BOOL Only add the content rating tag (no content tags). Existing tags are never removed
-  --privacy BOOL      Show or hide the tag output to the cli
-```
 
 ### Evaluate a number of files in Hydrus
 ```bash
-python -m wd-hydrus-tagger evaluate-api-batch hashes.txt
+python -m wd-hydrus-tagger my-list.txt --limit 10
 ```
-Where `hashes.txt` is a file containing one Hydrus file hash per line.
+`evaluate-api-batch` still works as another name for this, so older scripts keep working.
 
-#### Options:
-```
-  --cpu BOOLEAN       Use CPU instead of GPU
-  --model TEXT        The tagging model folder to use
-  --threshold FLOAT   The threshhold to drop tags below
-  --host TEXT         The URL for your Hydrus server
-  --tag-service TEXT  The tag service to send tags that match the threshold to
-  --ratings-only BOOL Only add the content rating tag (no content tags). Existing tags are never removed
-  --privacy BOOL      Show or hide the tag output to the cli
-  --tags              Treat the input file as a list of Hydrus search tags instead of hashes
-  --skip-resume       Ignore any unfinished checkpoint and start a fresh batch
-  --skip-tagged       With --tags, exclude files that already have the current model's AI marker
-  --limit INTEGER     Stop after this many files have been successfully tagged
-```
+Add `--help` after any command to see its options.
 
 ## RANDOM INFO:
-Everything has been confirmed to work on various Windows 10 installations. I've also read about other people getting everything (except GPU utilization) working on various linux distributions by changing the .bat files.
-If you do run into problems on other operating systems, the culprit is likely in `interrogate.py`, specifically where path() is invoked or it's something to do with the .bat files and how they're written.
+Everything has been confirmed to work on Windows 10. I've also read about other people getting everything (except GPU utilization) working on various linux distributions by changing the .bat files.
+If you do run into problems on other operating systems, the culprit is likely in `interrogate.py`, specifically where path() is invoked, or something to do with the .bat files and how they're written.
 
-`run_e621_hashes.bat` uses an e621 model that doesn't tag content ratings but should provide much more accurate tags for furry artwork. ...
-`run_wd_ratings.bat` runs the normal WD model which DOES tag ratings, but only adds the rating tag (no content tags). It never removes tags already on the file.
-It's recommended to run `run_wd_ratings.bat` AFTER running `run_e621_hashes.bat` ...
-Note that this is UNNECESSARY if `run_wd_hashes.bat` is ran on the file FIRST ...
-
-All modules have been edited to automatically add an "ai generated tags" tag to the file thats specific to which tagger was run.
-All .bat files use evaluate-api-batch, meaning to check individual files you MUST use `hashes.txt` or enter the command yourself.
-
-If you don't need furry or rating tagging capability, simply delete `run_e621_hashes.bat`/`run_wd_ratings.bat`, as well as the Z3d-E621-Convnext folder
+The Z3D-E621-Convnext model doesn't tag content ratings but should provide much more accurate tags for furry artwork. `ratings_only: true` (or `--ratings-only`) with a WD model adds only the rating tag, no content tags. It never removes tags already on the file. So for furry art you can run the e621 model first, then a WD model with `--ratings-only` to add the rating.
 
 My personal workflow is to have a hydrus search page that excludes all AI tags, filters to only PNG/JPG/WEBP images, and only images with less than 10 tags already (to avoid tagging already well-tagged files.) I also limit the results to around 2048 images, since that takes roughly an hour to process on my system.
-After tagging EVERYTHING with `run_wd_hashes.bat`, there will be some files that have been tagged with "furry" or "female furry".
-I then have another search page that collects all these newly identified furry files, and I run `run_e621_hashes.bat` on them after a sufficient amount is identified.
+After tagging EVERYTHING with a WD model, there will be some files that have been tagged with "furry" or "female furry".
+I then have another search page that collects all these newly identified furry files, and I run the e621 model on them after a sufficient amount is identified.
 
-I personally don't understand the difference between the different ViT/Convnext/MOAT tagging models, and since ViT was the default included with the tool, it's what I've been using.
+If you prefer a different model, create a new folder in the /model/ folder, put your .onnx and .csv file in there, then copy and paste an info.json from another folder and edit it appropriately. Then set `model:` in config.yaml (or use `--model`) to the new folder's name.
 
-If you prefer a different model for some reason, then just create a new folder in the /model/ folder, put your .onnx and .csv file in there, then copy and paste an info.json from another folder and edit it appropriately. Then you can edit or copy `run_wd_hashes.bat` and change the folder being pointed to from "wd-v1-4-vit-tagger-v2" to whatever you named your new folder. alternatively, you could just replace the "model.onnx" and "selected_tags.csv" files in the "wd-v1-4-vit-tagger-v2" folder with the ones you downloaded. I don't recommend this since it could lead to confusion on what model is actually being ran as well as overwriting the original tagging model, but if it's similar enough it should work okay.
+You can send each model's tags to its own tag service if you'd like: create a new tag service and set `tag_service` (or use `--tag-service`). This might be useful if you want to delete wd-hydrus-tagger tags from furry files, or delete a tag service if/when a new, better tagging model comes out so you can re-tag everything.
 
-You can have each .bat send the tags to their own personal tag service if you'd like, just create a new tag service and change the .bat file to point to the new tag service. This might be useful if you want to delete wd-hydrus-tagger tags from furry files, or delete a tag service if/when a new, better tagging model for anime/furry art comes out so you can re-tag everything.
-
-As of the latest version of this tagging tool, the way that the "ai generated tags" tags are made is different, meaning they very likely wont match the tags given to already processed files. I recommend sibling-ing the previous tag to the newly created one, or vice versa.
-
-I tested and confirmed that cuDNN 8.9.7 also works without issue, however as the onnxruntime documentation specifically calls for cuDNN 8.9.2, it's what i've listed in the setup instructions.
-
-I've read that "zlibwapi.dll" often exists elsewhere in windows installations, including in Nvidia Nsight installations (renamed to zlib.dll). I don't know if these would work, but they might do the trick if you can't/don't want to download the file separately. 
+As of the latest version of this tagging tool, the way that the "ai generated tags" tags are made is different, meaning they very likely won't match the tags given to files processed by older versions. I recommend sibling-ing the previous tag to the newly created one, or vice versa.
 
 YOU MUST REBUILD THE VENV IF YOU MOVE OR RENAME THIS FOLDER
 
 # CREDITS:
 - SmilingWolf for the WD tagging models as well as some simple code to detect Kaomojis. (https://huggingface.co/SmilingWolf)
 - Abtalerico for the well made original tool that I poorly edited to make this. (https://github.com/abtalerico/wd-hydrus-tagger) (deleted, copy can be found at  https://github.com/Garbevoir/wd-e621-hydrus-tagger/tree/main)
+- Garbevoir for the wd-e621-hydrus-tagger edit this fork builds on, including the local model folders with info.json, E621 model support, ratings-only tagging, tag service selection and the setup guide this README grew from. (https://github.com/Garbevoir/wd-e621-hydrus-tagger)
 - Zack3d (furzacky) for the E621 tagging model. (https://discord.com/channels/754509198674362388/1065785788698218526) (https://discord.gg/BDFpq9Yb7K)
 - Assamber for the video and animated file sampling support! (https://github.com/Assamber/wd-e621-hydrus-tagger)
 - This moderator on the Nvidia developer forums for providing safe downloads for zlibwapi.dll. (https://forums.developer.nvidia.com/t/could-not-load-library-cudnn-cnn-infer64-8-dll-error-code-193/218437/16)
