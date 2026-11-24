@@ -1,6 +1,7 @@
 import json
 import os.path
 import sys
+import time
 from io import BytesIO
 
 import click
@@ -19,6 +20,15 @@ DEFAULT_MODEL = "wd-v1-4-vit-tagger-v2"
 DEFAULT_THRESHOLD = 0.35
 DEFAULT_HOST = "http://127.0.0.1:45869"
 DEFAULT_TAG_SERVICE = "A.I. Tags"
+DEFAULT_INPUT = "input.txt"
+MODES = ("auto", "tags", "hashes")
+
+# Built-in retry: wait 3 s, then 6, 12, ... up to 60 s between tries. Give up
+# after this many failures in a row with no file finished in between, so an
+# error that happens every time (bad model, wrong token) can't loop forever.
+RETRY_FIRST_WAIT = 3
+RETRY_MAX_WAIT = 60
+RETRY_MAX_IN_A_ROW = 8
 
 
 def load_config(path="config.yaml"):
@@ -48,12 +58,78 @@ def to_bool(value):
     return bool(value)
 
 
+def to_limit(value):
+    """Read the limit setting. 0, blank or "none" means no limit."""
+    if value is None or (isinstance(value, str) and value.strip().lower() in ("", "none", "no", "off")):
+        return 0
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        raise click.UsageError(f"limit must be a whole number, 0 for no limit (got {value!r})") from None
+    if number < 0:
+        raise click.UsageError(f"limit can't be negative (got {number})")
+    return number
+
+
+def read_input(path, mode="auto"):
+    """Read the input file. Returns (mode, lines) with mode 'tags' or 'hashes'.
+
+    Blank lines and lines starting with # are ignored. In auto mode the file is
+    hashes if every line is a sha256 hash, tags if none are, and refused if mixed.
+    """
+    with open(path, encoding="utf-8-sig") as f:
+        entries = [line.strip() for line in f]
+    entries = [line for line in entries if line and not line.startswith("#")]
+    name = os.path.basename(path)
+    if not entries:
+        raise click.UsageError(
+            f"{name} has nothing to process. Add Hydrus search tags or file hashes, one per line "
+            f"(see input.txt.example)."
+        )
+    if mode != "auto":
+        return mode, entries
+    is_hash = [hydrus_safety.normalize_hash(line) is not None for line in entries]
+    if all(is_hash):
+        return "hashes", entries
+    if not any(is_hash):
+        return "tags", entries
+    first_hash = entries[is_hash.index(True)]
+    first_tag = entries[is_hash.index(False)]
+    raise click.UsageError(
+        f"{name} mixes file hashes and search tags (for example '{first_hash[:20]}...' and '{first_tag}'). "
+        f"Put only one kind in the file, or set 'mode: tags' or 'mode: hashes' in config.yaml (or use --mode)."
+    )
+
+
+class ResumeRefused(click.ClickException):
+    """The unfinished batch was started with different settings."""
+
+
+# Hydrus not answering, or busy: worth stopping the batch and retrying later.
+CONNECTION_ERRORS = (hydrus_api.ConnectionError, hydrus_api.DatabaseLocked)
+# Never retried: they would fail the same way every time, or the user asked to stop.
+NO_RETRY = (
+    click.exceptions.ClickException,
+    click.exceptions.Exit,
+    click.exceptions.Abort,
+    SafetyError,
+    hydrus_api.InsufficientAccess,
+    hydrus_api.MissingParameter,
+)
+
+
+def describe_error(error):
+    """Readable one-line description; hydrus_api hides the real cause behind __cause__."""
+    cause = error.__cause__ if isinstance(error, hydrus_api.ConnectionError) and error.__cause__ else error
+    return f"{type(cause).__name__}: {cause}"
+
+
 # Older bat files and docs pass these as "--cpu 0", "--privacy true", etc.
 # They are on/off flags now, so translate the old form before click sees it.
 _LEGACY_BOOL_FLAGS = {
     "--cpu": ("--cpu", "--gpu"),
     "--privacy": ("--privacy", "--show-tags"),
-    "--ratings-only": ("--ratings-only", None),
+    "--ratings-only": ("--ratings-only", "--no-ratings-only"),
 }
 _TRUE_WORDS = {"1", "true", "t", "yes", "y", "on"}
 _FALSE_WORDS = {"0", "false", "f", "no", "n", "off"}
@@ -230,18 +306,62 @@ def describe_send(file_hash, service, final_tags, show_tags=True):
     return text
 
 
-@click.group()
+class DefaultRunGroup(click.Group):
+    """A command group that runs the 'run' command when no command is named.
+
+    So "python -m wd-hydrus-tagger", "... --dry-run" and "... my-list.txt"
+    (a file dropped on run.bat) all start a batch.
+    """
+
+    def parse_args(self, ctx, args):
+        if not args or (args[0] not in self.commands and args[0] not in ctx.help_option_names):
+            args = ["run", *args]
+        return super().parse_args(ctx, args)
+
+
+CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"], "max_content_width": 100}
+
+
+@click.group(cls=DefaultRunGroup, context_settings=CONTEXT_SETTINGS)
 def cli():
-    pass
+    """Tag Hydrus files with an AI tagging model.
+
+    With no command, this runs a batch using the settings in config.yaml
+    (the same as the "run" command). Any setting can be changed for one run
+    with a flag, for example:
+
+    \b
+      python -m wd-hydrus-tagger --dry-run
+      python -m wd-hydrus-tagger my-list.txt --limit 10
+
+    Use "COMMAND --help" to see the options of a command.
+    """
 
 
-@click.command()
+# Help text shared by several commands. "config: x" names the config.yaml
+# setting that is used when the flag is not given.
+HELP = {
+    "token": "Hydrus Client API access key. [config: token]",
+    "host": f"Address of the Hydrus Client API. [config: host, default {DEFAULT_HOST}]",
+    "tag_service": f"Local Hydrus tag service to add tags to. [config: tag_service, default '{DEFAULT_TAG_SERVICE}']",
+    "model": f"Model folder inside model/. [config: model, default {DEFAULT_MODEL}]",
+    "threshold": f"Lowest score (0-1) a tag needs to be kept. [config: threshold, default {DEFAULT_THRESHOLD}]",
+    "max_tags": f"Most content tags per file, best scores first. [config: max_tags, default {hydrus_safety.DEFAULT_MAX_TAGS}]",
+    "cpu": "Run the model on the processor or the graphics card (GPU falls back to CPU if unavailable). [config: cpu, default --gpu]",
+    "ratings_only": "Only add the rating tag, no content tags. Existing tags are never removed. [config: ratings_only, default off]",
+    "privacy": "Hide or show the tags in the console. [config: privacy, default --privacy]",
+    "allow_my_tags": "Allow writing to Hydrus's built-in 'my tags' service (blocked by default).",
+}
+
+
+@click.command(context_settings=CONTEXT_SETTINGS)
 @click.argument("filename")
-@click.option("--cpu/--gpu", default=None, help="Run the model on the CPU or the GPU (default: config.yaml, else GPU)")
-@click.option("--model", default=None, help=f"The tagging model folder to use (default: config.yaml, else {DEFAULT_MODEL})")
-@click.option("--threshold", type=float, default=None, help=f"The threshold to drop tags below (default: config.yaml, else {DEFAULT_THRESHOLD})")
-@click.option("--max-tags", type=int, default=None, help=f"Keep at most this many content tags, highest scores first (default: config.yaml, else {hydrus_safety.DEFAULT_MAX_TAGS})")
+@click.option("--model", default=None, help=HELP["model"])
+@click.option("--threshold", type=float, default=None, help=HELP["threshold"])
+@click.option("--max-tags", type=int, default=None, help=HELP["max_tags"])
+@click.option("--cpu/--gpu", default=None, help=HELP["cpu"])
 def evaluate(filename, cpu, model, threshold, max_tags):
+    """Tag one image file on disk and print the tags. Nothing is sent to Hydrus."""
     config = load_config()
     settings = common_settings(config, cpu, model, threshold, max_tags)
     modelinfo, integerator = load_model(settings["model"], settings["cpu"])
@@ -252,20 +372,21 @@ def evaluate(filename, cpu, model, threshold, max_tags):
     click.echo("tags: " + ", ".join(content))
 
 
-@click.command()
+@click.command(context_settings=CONTEXT_SETTINGS)
 @click.argument("hash")
-@click.option("--token", help="The API token for your Hydrus server")
-@click.option("--cpu/--gpu", default=None, help="Run the model on the CPU or the GPU (default: config.yaml, else GPU)")
-@click.option("--model", default=None, help=f"The tagging model folder to use (default: config.yaml, else {DEFAULT_MODEL})")
-@click.option("--threshold", type=float, default=None, help=f"The threshold to drop tags below (default: config.yaml, else {DEFAULT_THRESHOLD})")
-@click.option("--max-tags", type=int, default=None, help=f"Keep at most this many content tags, highest scores first (default: config.yaml, else {hydrus_safety.DEFAULT_MAX_TAGS})")
-@click.option("--host", default=None, help=f"The URL for your Hydrus server (default: config.yaml, else {DEFAULT_HOST})")
-@click.option("--tag-service", default=None, help=f"The local Hydrus tag service to add tags to (default: config.yaml, else '{DEFAULT_TAG_SERVICE}')")
-@click.option("--ratings-only", is_flag=True, default=None, help="Only add the content rating tag (no content tags). Existing tags are never removed")
-@click.option("--privacy/--show-tags", default=None, help="Hide or show the tag output in the console (default: config.yaml, else hide)")
-@click.option("--dry-run", is_flag=True, help="Do everything except write to Hydrus, and print what would be sent")
-@click.option("--allow-my-tags", is_flag=True, help="Allow writing to the built-in 'my tags' service")
+@click.option("--token", help=HELP["token"])
+@click.option("--host", default=None, help=HELP["host"])
+@click.option("--tag-service", default=None, help=HELP["tag_service"])
+@click.option("--model", default=None, help=HELP["model"])
+@click.option("--threshold", type=float, default=None, help=HELP["threshold"])
+@click.option("--max-tags", type=int, default=None, help=HELP["max_tags"])
+@click.option("--cpu/--gpu", default=None, help=HELP["cpu"])
+@click.option("--ratings-only/--no-ratings-only", default=None, help=HELP["ratings_only"])
+@click.option("--privacy/--show-tags", default=None, help=HELP["privacy"])
+@click.option("--dry-run", is_flag=True, help="Do everything except write to Hydrus, and print what would be sent.")
+@click.option("--allow-my-tags", is_flag=True, help=HELP["allow_my_tags"])
 def evaluate_api(hash, token, cpu, model, threshold, max_tags, host, tag_service, ratings_only, privacy, dry_run, allow_my_tags):
+    """Tag one file in Hydrus, given its sha256 hash."""
     file_hash = hydrus_safety.normalize_hash(hash)
     if file_hash is None:
         raise click.UsageError(f"'{hash}' is not a sha256 hash (64 hex characters)")
@@ -302,34 +423,146 @@ def evaluate_api(hash, token, cpu, model, threshold, max_tags, host, tag_service
     click.echo(f"Added {len(final_tags)} tags to {file_hash}")
 
 
-@click.command()
-@click.argument("inputfile")
-@click.option("--token", help="The API token for your Hydrus server")
-@click.option("--cpu/--gpu", default=None, help="Run the model on the CPU or the GPU (default: config.yaml, else GPU)")
-@click.option("--model", default=None, help=f"The tagging model folder to use (default: config.yaml, else {DEFAULT_MODEL})")
-@click.option("--threshold", type=float, default=None, help=f"The threshold to drop tags below (default: config.yaml, else {DEFAULT_THRESHOLD})")
-@click.option("--max-tags", type=int, default=None, help=f"Keep at most this many content tags per file, highest scores first (default: config.yaml, else {hydrus_safety.DEFAULT_MAX_TAGS})")
-@click.option("--host", default=None, help=f"The URL for your Hydrus server (default: config.yaml, else {DEFAULT_HOST})")
-@click.option("--tag-service", default=None, help=f"The local Hydrus tag service to add tags to (default: config.yaml, else '{DEFAULT_TAG_SERVICE}')")
-@click.option("--ratings-only", is_flag=True, default=None, help="Only add the content rating tag (no content tags). Existing tags are never removed")
-@click.option("--privacy/--show-tags", default=None, help="Hide or show the tag output in the console (default: config.yaml, else hide)")
-@click.option("--tags", "tags_mode", is_flag=True, help="Treat inputfile as a list of Hydrus search tags instead of hashes")
-@click.option("--skip-resume", is_flag=True, help="Ignore any unfinished checkpoint and start a fresh batch")
-@click.option("--skip-tagged", is_flag=True, help="Skip files that already have an AI-generated tags marker")
-@click.option("--limit", type=int, default=None, help="Stop after this many files have been successfully tagged (skips do not count)")
-@click.option("--dry-run", is_flag=True, help="Do everything except write to Hydrus; log what would be sent to dryrun.log")
-@click.option("--allow-my-tags", is_flag=True, help="Allow writing to the built-in 'my tags' service")
-def evaluate_api_batch(inputfile, token, cpu, model, threshold, max_tags, host, tag_service, ratings_only, privacy, tags_mode, skip_resume, skip_tagged, limit, dry_run, allow_my_tags):
+BATCH_PARAMS = [
+    click.argument("input_path", metavar="[INPUT]", required=False),
+    click.option("--mode", type=click.Choice(MODES, case_sensitive=False), default=None,
+                 help="How to read INPUT: auto (works it out), tags (Hydrus search tags) or hashes (sha256 file hashes). [config: mode, default auto]"),
+    click.option("--tags", "tags_flag", is_flag=True, help="Same as --mode tags (kept for older bat files)."),
+    click.option("--model", default=None, help=HELP["model"]),
+    click.option("--threshold", type=float, default=None, help=HELP["threshold"]),
+    click.option("--max-tags", type=int, default=None, help=HELP["max_tags"]),
+    click.option("--limit", type=int, default=None, help="Stop after this many files are tagged; skipped files don't count. 0 = no limit. [config: limit, default 0]"),
+    click.option("--skip-tagged/--no-skip-tagged", default=None, help="Skip files this model has already tagged. [config: skip_tagged, default off]"),
+    click.option("--ratings-only/--no-ratings-only", default=None, help=HELP["ratings_only"]),
+    click.option("--dry-run/--no-dry-run", default=None, help="Do everything except write to Hydrus; what would be sent goes to dryrun.log. [config: dry_run, default off]"),
+    click.option("--retry/--no-retry", default=None, help="If the batch crashes (e.g. Hydrus stops answering), wait and carry on where it left off. [config: retry, default off]"),
+    click.option("--skip-resume", is_flag=True, help="Start a new batch even if the last one didn't finish (replaces session.log)."),
+    click.option("--token", default=None, help=HELP["token"]),
+    click.option("--host", default=None, help=HELP["host"]),
+    click.option("--tag-service", default=None, help=HELP["tag_service"]),
+    click.option("--cpu/--gpu", default=None, help=HELP["cpu"]),
+    click.option("--privacy/--show-tags", default=None, help=HELP["privacy"]),
+    click.option("--allow-my-tags", is_flag=True, help=HELP["allow_my_tags"]),
+]
+
+
+def batch_params(f):
+    for param in reversed(BATCH_PARAMS):
+        f = param(f)
+    return f
+
+
+BATCH_HELP = """Tag a batch of Hydrus files listed in a text file.
+
+INPUT is the text file to read (or drop one on run.bat). Without it the
+"input" setting in config.yaml is used, else input.txt. The file holds
+either Hydrus search tags or sha256 file hashes, one per line. Blank lines
+and lines starting with # are ignored.
+
+If a batch stops part way, the next run carries on from session.log.
+"""
+
+
+@click.command("run", context_settings=CONTEXT_SETTINGS, help=BATCH_HELP + "\nThis is what runs when no command is given.")
+@batch_params
+def run_cmd(**kwargs):
+    run_batch_command(**kwargs)
+
+
+@click.command("evaluate-api-batch", context_settings=CONTEXT_SETTINGS, short_help="Same as run (older name, kept for old bat files).", help=BATCH_HELP + "\nSame as \"run\"; kept so older bat files keep working.")
+@batch_params
+def evaluate_api_batch(**kwargs):
+    run_batch_command(**kwargs)
+
+
+def batch_settings(config, input_path, mode, tags_flag, model, threshold, max_tags, limit, skip_tagged,
+                   ratings_only, dry_run, retry, skip_resume, token, host, tag_service, cpu, privacy, allow_my_tags):
+    """Every batch setting, from flags first, then config.yaml, then defaults.
+    Also reads the input file, so mistakes stop the run before Hydrus is contacted."""
+    settings = api_settings(config, token, cpu, model, threshold, max_tags, host, tag_service, ratings_only, privacy)
+
+    if tags_flag:
+        if mode is not None and mode.lower() != "tags":
+            raise click.UsageError(f"--tags and --mode {mode} disagree; use one of them")
+        mode = "tags"
+    mode = str(resolve(mode, "mode", "auto", config)).strip().lower()
+    if mode not in MODES:
+        raise click.UsageError(f"mode must be one of {', '.join(MODES)} (got '{mode}')")
+
+    settings["input"] = str(input_path or resolve(None, "input", DEFAULT_INPUT, config))
+    if not os.path.isfile(settings["input"]):
+        hint = ""
+        if input_path and not os.path.splitext(input_path)[1] and os.sep not in input_path and "/" not in input_path:
+            hint = " If you meant a command, see --help."
+        raise click.UsageError(
+            f"Input file '{settings['input']}' not found. Create it (see input.txt.example), "
+            f"set 'input' in config.yaml, or give the file path.{hint}"
+        )
+    settings["mode"], settings["entries"] = read_input(settings["input"], mode)
+
+    settings["limit"] = to_limit(resolve(limit, "limit", 0, config))
+    settings["skip_tagged"] = to_bool(resolve(skip_tagged, "skip_tagged", False, config))
+    settings["dry_run"] = to_bool(resolve(dry_run, "dry_run", False, config))
+    settings["retry"] = to_bool(resolve(retry, "retry", False, config))
+    settings["skip_resume"] = bool(skip_resume)
+    settings["allow_my_tags"] = bool(allow_my_tags)
+    return settings
+
+
+def run_batch_command(**kwargs):
     interrogate.session_debug.clear()
     config = load_config()
-    settings = api_settings(config, token, cpu, model, threshold, max_tags, host, tag_service, ratings_only, privacy)
+    settings = batch_settings(config, **kwargs)
+    # Shared between attempts: how many files have been finished, whether this
+    # run already started its own session.log, and the loaded model.
+    state = {"files_done": 0, "log_started": False, "model": None}
+    failures_in_a_row = 0
+    while True:
+        files_before = state["files_done"]
+        try:
+            run_batch(settings, settings["skip_resume"] and not state["log_started"], state)
+            return
+        except NO_RETRY:
+            raise
+        except Exception as e:
+            if not settings["retry"] or settings["dry_run"]:
+                if isinstance(e, CONNECTION_ERRORS):
+                    raise click.ClickException(
+                        f"Lost contact with Hydrus ({describe_error(e)}). Run again to carry on where it stopped, or turn on retry."
+                    ) from e
+                raise
+            if state["files_done"] > files_before:
+                failures_in_a_row = 0
+            failures_in_a_row += 1
+            if failures_in_a_row >= RETRY_MAX_IN_A_ROW:
+                raise click.ClickException(
+                    f"Stopped retrying: the batch failed {failures_in_a_row} times in a row without finishing a file. "
+                    f"Last error: {describe_error(e)}"
+                ) from e
+            wait = min(RETRY_FIRST_WAIT * 2 ** (failures_in_a_row - 1), RETRY_MAX_WAIT)
+            click.echo(
+                f"[{time.strftime('%H:%M:%S')}] The batch stopped with an error: {describe_error(e)}\n"
+                f"Retrying in {wait} seconds ({failures_in_a_row} of {RETRY_MAX_IN_A_ROW - 1} retries in a row). Press Ctrl+C to stop.",
+                err=True,
+            )
+            time.sleep(wait)
+            interrogate.session_debug.clear()
+
+
+def run_batch(settings, skip_resume, state):
+    """One attempt at the batch. Raises on anything that should stop it."""
+    interrogate.session_debug.clear()
     threshold = settings["threshold"]
     max_tags = settings["max_tags"]
     ratings_only = settings["ratings_only"]
     privacy = settings["privacy"]
-
-    if not os.path.isfile(inputfile):
-        raise click.UsageError("input file not found!")
+    inputfile = settings["input"]
+    tags_mode = settings["mode"] == "tags"
+    skip_tagged = settings["skip_tagged"]
+    limit = settings["limit"]
+    dry_run = settings["dry_run"]
+    allow_my_tags = settings["allow_my_tags"]
+    debug(f"DEBUG: reading {inputfile} as {'search tags' if tags_mode else 'hashes'} ({len(settings['entries'])} lines)")
 
     if dry_run:
         # A dry run never touches the real checkpoint, so it can't affect resume.
@@ -344,7 +577,7 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, max_tags, host, 
     already_done = set()
     hashes = []
     # What this run will do. Written as the first line of a fresh session.log
-    # and compared on resume, so a resume can't mix models, inputs or targets.
+    # and compared on resume, so a resume can't mix models, modes or targets.
     current_run = resume_check.run_settings(
         settings["model"], inputfile, tags_mode, ratings_only,
         settings["tag_service_key"] or settings["tag_service"],
@@ -393,10 +626,7 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, max_tags, host, 
                 except ValueError:
                     hard, soft = [("run-settings line", "unreadable", "")], []
                 if hard:
-                    click.echo(resume_check.mismatch_message(hard, checkpoint_file), err=True)
-                    # Exit code 0 on purpose: repeat-run.bat retries on any
-                    # error, which would repeat this refusal forever.
-                    click.get_current_context().exit(0)
+                    raise ResumeRefused(resume_check.mismatch_message(hard, checkpoint_file))
                 if soft:
                     click.echo(resume_check.soft_message(soft), err=True)
             resuming = True
@@ -414,7 +644,13 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, max_tags, host, 
     else:
         debug("DEBUG: no previous batch found; starting fresh")
 
-    modelinfo, integerator = load_model(settings["model"], settings["cpu"])
+    # The model is loaded once per run, not again on every retry.
+    model_key = (settings["model"], settings["cpu"])
+    if state.get("model") and state["model"][0] == model_key:
+        modelinfo, integerator = state["model"][1]
+    else:
+        modelinfo, integerator = load_model(settings["model"], settings["cpu"])
+        state["model"] = (model_key, (modelinfo, integerator))
     if ratings_only and not modelinfo['ratingsflag']:
         raise click.UsageError("--ratings-only set, but model does not support ratings!")
 
@@ -424,8 +660,7 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, max_tags, host, 
     if hashes is None:
         raw_hashes = []
     elif tags_mode:
-        with open(inputfile) as f:
-            search_tags = [line.strip() for line in f if line.strip()]
+        search_tags = list(settings["entries"])
         # --limit stops the run after N successful tags. It does not override
         # a system:limit the user put in the search. If they didn't set one,
         # add a safety cap so we don't pull the entire database.
@@ -460,9 +695,7 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, max_tags, host, 
             raw_hashes = result
         debug(f"DEBUG: Found {len(raw_hashes)} files")
     else:
-        with open(inputfile) as hashfile_f:
-            raw_hashes = [line.strip() for line in hashfile_f if line.strip()]
-
+        raw_hashes = list(settings["entries"])
     # Only lowercase 64-hex sha256 hashes go any further. "sha256:" prefixes
     # are removed, duplicates are dropped, and anything else is reported.
     hashes = []
@@ -496,6 +729,9 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, max_tags, host, 
         with open(checkpoint_file, "w") as f:
             if not dry_run:
                 f.write(resume_check.header_line(current_run) + "\n")
+                # A retry after this point resumes this log instead of
+                # starting over, even if --skip-resume was given.
+                state["log_started"] = True
             for line in interrogate.session_debug:
                 f.write(line + "\n")
             if limit:
@@ -511,6 +747,7 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, max_tags, host, 
         try:
             with open(checkpoint_file, "a") as f:
                 f.write(f"{hash_value}\t{status}\n")
+            state["files_done"] += 1
         except Exception as e:
             debug(f"DEBUG: failed to update checkpoint for {hash_value}: {e}")
 
@@ -565,6 +802,10 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, max_tags, host, 
                     only_return_basic_information=not skip_tagged,
                     include_services_object=False,
                 )
+            except CONNECTION_ERRORS:
+                # Hydrus is gone or busy: stop the batch (and retry, if on)
+                # rather than marking every remaining file as failed.
+                raise
             except Exception as e:
                 log_result(hash, f"failed to fetch metadata from Hydrus: {e}")
                 skipped_count += 1
@@ -591,6 +832,10 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, max_tags, host, 
 
             try:
                 file = client.get_file(hash).content
+            except CONNECTION_ERRORS:
+                # Hydrus is gone or busy: stop the batch (and retry, if on)
+                # rather than marking every remaining file as failed.
+                raise
             except Exception as e:
                 log_result(hash, f"failed to fetch from Hydrus: {e}")
                 skipped_count += 1
@@ -682,6 +927,10 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, max_tags, host, 
                 if limit and tagged_count >= limit:
                     debug(f"DEBUG: reached --limit {limit}; stopping")
                     break
+            except CONNECTION_ERRORS:
+                # Hydrus is gone or busy: stop the batch (and retry, if on)
+                # rather than marking every remaining file as failed.
+                raise
             except Exception as e:
                 log_result(hash, f"failed to add tags: {e}")
                 skipped_count += 1
@@ -713,10 +962,13 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, max_tags, host, 
         f.write(f"tagged={tagged_count} skipped={skipped_count}\n")
 
 
+cli.add_command(run_cmd)
+cli.add_command(evaluate)
+cli.add_command(evaluate_api)
+cli.add_command(evaluate_api_batch)
+
+
 if __name__ == '__main__':
     Image.init()
     ImageFile.LOAD_TRUNCATED_IMAGES = True
-    cli.add_command(evaluate)
-    cli.add_command(evaluate_api)
-    cli.add_command(evaluate_api_batch)
-    cli(args=upgrade_legacy_bool_args(sys.argv[1:]))
+    cli(args=upgrade_legacy_bool_args(sys.argv[1:]), prog_name="python -m wd-hydrus-tagger")
