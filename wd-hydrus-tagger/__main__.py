@@ -223,8 +223,11 @@ def build_tags(modelinfo, ratings, tag_scores, threshold, max_tags, ratings_only
     return rating, content, final
 
 
-def describe_send(file_hash, service, final_tags):
-    return f"{file_hash} -> '{service[1]}' ({service[0]}, type {service[2]}): {len(final_tags)} tags: {', '.join(final_tags)}"
+def describe_send(file_hash, service, final_tags, show_tags=True):
+    text = f"{file_hash} -> '{service[1]}' ({service[0]}, type {service[2]}): {len(final_tags)} tags"
+    if show_tags:
+        text += ": " + ", ".join(final_tags)
+    return text
 
 
 @click.group()
@@ -289,7 +292,7 @@ def evaluate_api(hash, token, cpu, model, threshold, max_tags, host, tag_service
         click.echo("tags: " + ", ".join(content))
 
     if dry_run:
-        click.echo("DRY RUN, nothing written: " + describe_send(file_hash, service, final_tags))
+        click.echo("DRY RUN, nothing written: " + describe_send(file_hash, service, final_tags, not settings["privacy"]))
         return
     client.add_tags(
         hashes=[file_hash],
@@ -625,7 +628,7 @@ def evaluate_api_batch(inputfile, token, cpu, model, threshold, max_tags, host, 
                 click.echo()
 
             if dry_run:
-                click.echo(" DRY RUN, nothing written: " + describe_send(hash, service, final_tags))
+                click.echo(" DRY RUN, nothing written: " + describe_send(hash, service, final_tags, not privacy))
                 log_result(hash, "DRY RUN\t" + ", ".join(final_tags))
                 tagged_count += 1
                 if limit:
