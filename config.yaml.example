@@ -56,7 +56,8 @@ max_tags: 150
 cpu: false
 # true = only add the rating tag (like rating:general), no content tags.
 ratings_only: false
-
+# true = leave the underscores as they are in the generated tags
+keep_underscores: false
 ## Console output
 # true = don't print each file's tags in the console window. false = print them.
 privacy: true
