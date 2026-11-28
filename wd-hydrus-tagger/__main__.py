@@ -280,6 +280,15 @@ def pick_rating(modelinfo, ratings):
         return None
     return max(ratings, key=lambda k: ratings[k])
 
+def build_model_marker(modelinfo, ratings_only=False):
+    prefix = "ratings only " if ratings_only else ""
+    marker = f"{prefix}{modelinfo['modelname']} ai generated tags"
+
+    return hydrus_safety.sanitize_tags(
+        [marker],
+        keep_namespace=True,
+        keep_underscores=False
+    )[0]
 
 def build_tags(modelinfo, ratings, tag_scores, threshold, max_tags, ratings_only, *, keep_underscores=False):
     """Return (rating, content_tags, final_tags). final_tags is exactly what gets sent."""
@@ -295,10 +304,7 @@ def build_tags(modelinfo, ratings, tag_scores, threshold, max_tags, ratings_only
     if rating:
         own.append("rating:" + rating)
 
-    prefix = "ratings only " if ratings_only else ""
-    own.append(f"{prefix}{modelinfo['modelname']} ai generated tags")
-
-    own = hydrus_safety.sanitize_tags(own, keep_namespace=True)
+    own.append(build_model_marker(modelinfo, ratings_only))
 
     final = list(dict.fromkeys(content + own))
     return rating, content, final
@@ -746,7 +752,7 @@ def run_batch(settings, skip_resume, state):
         # fetching them and skipping after the fact. Uses the current model's
         # own marker so it works for any model the user has installed.
         if skip_tagged:
-            marker = modelinfo['modelname'] + " ai generated tags"
+            marker = build_model_marker(modelinfo)
             negative = "-" + marker
             if negative not in search_tags and marker not in search_tags:
                 search_tags.append(negative)
