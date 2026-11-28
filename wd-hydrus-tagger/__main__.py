@@ -727,6 +727,11 @@ def run_batch(settings, skip_resume, state):
     service_key = service[0]
     console.info("Target:", describe_service(service))
 
+    expected_markers = frozenset({
+        build_model_marker(modelinfo, ratings_only=False),
+        build_model_marker(modelinfo, ratings_only=True)
+    })
+
     if hashes is None:
         raw_hashes = []
     elif tags_mode:
@@ -752,11 +757,12 @@ def run_batch(settings, skip_resume, state):
         # fetching them and skipping after the fact. Uses the current model's
         # own marker so it works for any model the user has installed.
         if skip_tagged:
-            marker = build_model_marker(modelinfo)
-            negative = "-" + marker
-            if negative not in search_tags and marker not in search_tags:
-                search_tags.append(negative)
-                debug(f"DEBUG: --skip-tagged set; adding negative search term: {negative}")
+            for marker in expected_markers:
+                negative = "-" + marker
+
+                if negative not in search_tags and marker not in search_tags:
+                    search_tags.append(negative)
+                    debug(f"DEBUG: --skip-tagged set; adding negative search term: {negative}")
         debug(f"DEBUG: Searching Hydrus for tags: {search_tags}")
         result = client.search_files(tags=search_tags, return_hashes=True, return_file_ids=False)
         if isinstance(result, dict):
@@ -881,32 +887,21 @@ def run_batch(settings, skip_resume, state):
     tagged_count = 0
     skipped_count = 0
 
-    # Collect every tag string out of a Hydrus metadata dict, whatever nesting it uses
-    def collect_tags(obj):
-        found = []
-        if isinstance(obj, dict):
-            for v in obj.values():
-                found.extend(collect_tags(v))
-        elif isinstance(obj, list):
-            for item in obj:
-                if isinstance(item, str):
-                    found.append(item)
-                else:
-                    found.extend(collect_tags(item))
-        return found
-
     # True if the file already carries an AI-generated marker for this model
-    # (handles both spaced and underscored forms, and the "ratings only" variant)
     def already_ai_tagged(file_meta):
         if not file_meta:
             return False
-        existing = collect_tags(file_meta.get("tags", {}))
-        model_name = modelinfo['modelname'].lower().replace("_", " ")
-        for tag in existing:
-            normalized = tag.lower().replace("_", " ")
-            if "ai generated tags" in normalized and model_name in normalized:
-                return True
-        return False
+
+        current_tags = (
+            file_meta
+            .get("tags", {})
+            .get(service_key, {})
+            .get("storage_tags", {})
+            .get("0", [])
+        )
+
+        # Return True if either expected marker is currently present.
+        return not expected_markers.isdisjoint(current_tags)
 
     with progress:
         for hash in hashes:
