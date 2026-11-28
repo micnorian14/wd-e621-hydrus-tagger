@@ -71,6 +71,7 @@ Every setting is explained in `config.yaml.example`, and the values in it are th
 | `max_tags` | Most content tags added to one file | `150` |
 | `request_timeout` | Seconds to wait for Hydrus to answer | `600` |
 | `cpu` | `true` = run the model on the processor, `false` = graphics card | `false` |
+| `keep_underscores` | Whether to keep underscores in generated tags or not. `false` = replace underscores with a space instead | `false` |
 
 Flags typed after the command (or after `run.bat`) override config.yaml for that one run, for example `run.bat --limit 10`.
 
