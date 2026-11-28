@@ -282,7 +282,7 @@ def pick_rating(modelinfo, ratings):
 
 def build_model_marker(modelinfo, ratings_only=False):
     prefix = "ratings only " if ratings_only else ""
-    marker = f"tagger:{prefix}{modelinfo['modelname']} ai generated tags"
+    marker = f"tagger:{prefix}{modelinfo['modelname']} (ai generated tags)"
 
     return hydrus_safety.sanitize_tags(
         [marker],
