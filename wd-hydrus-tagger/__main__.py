@@ -282,7 +282,7 @@ def pick_rating(modelinfo, ratings):
 
 def build_model_marker(modelinfo, ratings_only=False):
     prefix = "ratings only " if ratings_only else ""
-    marker = f"{prefix}{modelinfo['modelname']} ai generated tags"
+    marker = f"tagger:{prefix}{modelinfo['modelname']} ai generated tags"
 
     return hydrus_safety.sanitize_tags(
         [marker],
@@ -293,12 +293,12 @@ def build_model_marker(modelinfo, ratings_only=False):
 def build_tags(modelinfo, ratings, tag_scores, threshold, max_tags, ratings_only, *, keep_underscores=False):
     """Return (rating, content_tags, final_tags). final_tags is exactly what gets sent."""
     rating = pick_rating(modelinfo, ratings)
-    
+
     content = [] if ratings_only else hydrus_safety.sanitize_tags(
         hydrus_safety.select_tags(tag_scores, threshold, max_tags),
         keep_underscores=keep_underscores
     )
-    
+
     own = []
 
     if rating:
