@@ -163,34 +163,6 @@ def upgrade_legacy_bool_args(argv):
     return out
 
 
-kaomojis = [
-    "0_0",
-    "(o)_(o)",
-    "+_+",
-    "+_-",
-    "._.",
-    "<o>_<o>",
-    "<|>_<|>",
-    "=_=",
-    ">_<",
-    "3_3",
-    "6_9",
-    ">_o",
-    "@_@",
-    "^_^",
-    "o_o",
-    "u_u",
-    "x_x",
-    "|_|",
-    "||_||",
-    ":d",
-    ":3",
-    ":o",
-    ";d",
-    ":>="
-]
-
-
 def debug(msg):
     """Record a debug line for session.log; print it only with --verbose."""
     if console.verbose:
@@ -244,13 +216,14 @@ def provider_name(integerator, cpu):
     return "CPU" if cpu else "CPU (GPU not available)"
 
 
-def common_settings(config, cpu, model, threshold, max_tags):
+def common_settings(config, cpu, model, threshold, max_tags, keep_underscores=None):
     """Settings shared by every command: CLI flag, then config.yaml, then built-in default."""
     settings = {
         "cpu": to_bool(resolve(cpu, "cpu", False, config)),
         "model": resolve(model, "model", DEFAULT_MODEL, config),
         "threshold": resolve(threshold, "threshold", DEFAULT_THRESHOLD, config),
         "max_tags": resolve(max_tags, "max_tags", hydrus_safety.DEFAULT_MAX_TAGS, config),
+        "keep_underscores": to_bool(resolve(keep_underscores, "keep_underscores", False, config)),
     }
     try:
         warning = hydrus_safety.check_threshold(settings["threshold"])
@@ -263,9 +236,9 @@ def common_settings(config, cpu, model, threshold, max_tags):
     return settings
 
 
-def api_settings(config, token, cpu, model, threshold, max_tags, host, tag_service, ratings_only, privacy):
+def api_settings(config, token, cpu, model, threshold, max_tags, host, tag_service, ratings_only, privacy, keep_underscores=None):
     """Settings for the Hydrus commands."""
-    settings = common_settings(config, cpu, model, threshold, max_tags)
+    settings = common_settings(config, cpu, model, threshold, max_tags, keep_underscores=keep_underscores)
     settings["token"] = resolve(token, "token", None, config)
     if not settings["token"]:
         raise click.UsageError("API token required. Set 'token' in config.yaml or pass --token")
@@ -308,20 +281,26 @@ def pick_rating(modelinfo, ratings):
     return max(ratings, key=lambda k: ratings[k])
 
 
-def build_tags(modelinfo, ratings, tag_scores, threshold, max_tags, ratings_only):
+def build_tags(modelinfo, ratings, tag_scores, threshold, max_tags, ratings_only, *, keep_underscores=False):
     """Return (rating, content_tags, final_tags). final_tags is exactly what gets sent."""
     rating = pick_rating(modelinfo, ratings)
-    content = [] if ratings_only else hydrus_safety.select_tags(tag_scores, threshold, max_tags)
-    content = hydrus_safety.sanitize_tags(content)
+    
+    content = [] if ratings_only else hydrus_safety.sanitize_tags(
+        hydrus_safety.select_tags(tag_scores, threshold, max_tags),
+        keep_underscores=keep_underscores
+    )
+    
     own = []
+
     if rating:
         own.append("rating:" + rating)
-    if ratings_only:
-        own.append("ratings only " + modelinfo['modelname'] + " ai generated tags")
-    else:
-        own.append(modelinfo['modelname'] + " ai generated tags")
-    # Our own tags keep their namespace (rating:...), everything is deduped.
-    final = hydrus_safety.sanitize_tags(content + hydrus_safety.sanitize_tags(own, keep_namespace=True), keep_namespace=True)
+
+    prefix = "ratings only " if ratings_only else ""
+    own.append(f"{prefix}{modelinfo['modelname']} ai generated tags")
+
+    own = hydrus_safety.sanitize_tags(own, keep_namespace=True)
+
+    final = list(dict.fromkeys(content + own))
     return rating, content, final
 
 
@@ -377,6 +356,10 @@ HELP = {
     "ratings_only": "Only add the rating tag, no content tags. Existing tags are never removed. [config: ratings_only, default off]",
     "privacy": "Hide or show each file's tags in the console. [config: privacy, default --privacy]",
     "allow_my_tags": "Allow writing to Hydrus's built-in 'my tags' service (blocked by default).",
+    "keep_underscores": (
+    "Preserve underscores in model-generated tags. "
+    "Kaomojis are always preserved. "
+    "[config: keep_underscores, default off]"),
     "verbose": "Show every detail: DEBUG lines, one line per file, full service key. [config: verbose, default off]",
 }
 
@@ -388,15 +371,20 @@ HELP = {
 @click.option("--max-tags", type=int, default=None, help=HELP["max_tags"])
 @click.option("--cpu/--gpu", default=None, help=HELP["cpu"])
 @click.option("--verbose/--no-verbose", default=None, help=HELP["verbose"])
-def evaluate(filename, cpu, model, threshold, max_tags, verbose):
+@click.option(
+    "--keep-underscores/--no-keep-underscores",
+    default=None,
+    help=HELP["keep_underscores"]
+)
+def evaluate(filename, cpu, model, threshold, max_tags, verbose, keep_underscores):
     """Tag one image file on disk and print the tags. Nothing is sent to Hydrus."""
     config = load_config()
     apply_verbose(verbose, config)
-    settings = common_settings(config, cpu, model, threshold, max_tags)
+    settings = common_settings(config, cpu, model, threshold, max_tags, keep_underscores=keep_underscores)
     modelinfo, integerator = load_model(settings["model"], settings["cpu"])
     image = Image.open(filename)
     ratings, tag_scores = integerator.interrogate(image)
-    rating, content, _ = build_tags(modelinfo, ratings, tag_scores, settings["threshold"], settings["max_tags"], False)
+    rating, content, _ = build_tags(modelinfo, ratings, tag_scores, settings["threshold"], settings["max_tags"], False, keep_underscores=settings["keep_underscores"])
     click.echo("rating: " + (rating or "none"))
     click.echo("tags: " + ", ".join(content))
 
@@ -415,14 +403,19 @@ def evaluate(filename, cpu, model, threshold, max_tags, verbose):
 @click.option("--dry-run", is_flag=True, help="Do everything except write to Hydrus, and print what would be sent.")
 @click.option("--allow-my-tags", is_flag=True, help=HELP["allow_my_tags"])
 @click.option("--verbose/--no-verbose", default=None, help=HELP["verbose"])
-def evaluate_api(hash, token, cpu, model, threshold, max_tags, host, tag_service, ratings_only, privacy, dry_run, allow_my_tags, verbose):
+@click.option(
+    "--keep-underscores/--no-keep-underscores",
+    default=None,
+    help=HELP["keep_underscores"]
+)
+def evaluate_api(hash, token, cpu, model, threshold, max_tags, host, tag_service, ratings_only, privacy, dry_run, allow_my_tags, verbose, keep_underscores):
     """Tag one file in Hydrus, given its sha256 hash."""
     file_hash = hydrus_safety.normalize_hash(hash)
     if file_hash is None:
         raise click.UsageError(f"'{hash}' is not a sha256 hash (64 hex characters)")
     config = load_config()
     apply_verbose(verbose, config)
-    settings = api_settings(config, token, cpu, model, threshold, max_tags, host, tag_service, ratings_only, privacy)
+    settings = api_settings(config, token, cpu, model, threshold, max_tags, host, tag_service, ratings_only, privacy,keep_underscores=keep_underscores)
 
     modelinfo, integerator = load_model(settings["model"], settings["cpu"])
     if settings["ratings_only"] and not modelinfo['ratingsflag']:
@@ -437,7 +430,7 @@ def evaluate_api(hash, token, cpu, model, threshold, max_tags, host, tag_service
     image_bytes = BytesIO(client.get_file(file_hash).content)
     image = Image.open(image_bytes)
     ratings, tag_scores = integerator.interrogate(image)
-    rating, content, final_tags = build_tags(modelinfo, ratings, tag_scores, settings["threshold"], settings["max_tags"], settings["ratings_only"])
+    rating, content, final_tags = build_tags(modelinfo, ratings, tag_scores, settings["threshold"], settings["max_tags"], settings["ratings_only"], keep_underscores=settings["keep_underscores"])
 
     if not settings["privacy"]:
         click.echo("rating: " + (rating or "none"))
@@ -475,6 +468,9 @@ BATCH_PARAMS = [
     click.option("--privacy/--show-tags", default=None, help=HELP["privacy"]),
     click.option("--allow-my-tags", is_flag=True, help=HELP["allow_my_tags"]),
     click.option("--verbose/--no-verbose", default=None, help=HELP["verbose"]),
+    click.option(
+    "--keep-underscores/--no-keep-underscores", default=None, help=HELP["keep_underscores"]
+),
 ]
 
 
@@ -508,11 +504,11 @@ def evaluate_api_batch(**kwargs):
 
 
 def batch_settings(config, input_path, mode, tags_flag, model, threshold, max_tags, limit, skip_tagged,
-                   ratings_only, dry_run, retry, skip_resume, token, host, tag_service, cpu, privacy, allow_my_tags, verbose):
+                   ratings_only, dry_run, retry, skip_resume, token, host, tag_service, cpu, privacy, allow_my_tags, verbose, keep_underscores=None):
     """Every batch setting, from flags first, then config.yaml, then defaults.
     Also reads the input file, so mistakes stop the run before Hydrus is contacted."""
     apply_verbose(verbose, config)
-    settings = api_settings(config, token, cpu, model, threshold, max_tags, host, tag_service, ratings_only, privacy)
+    settings = api_settings(config, token, cpu, model, threshold, max_tags, host, tag_service, ratings_only, privacy, keep_underscores=keep_underscores)
 
     if tags_flag:
         if mode is not None and mode.lower() != "tags":
@@ -1012,7 +1008,7 @@ def run_batch(settings, skip_resume, state):
                     skipped_count += 1
                     continue
 
-            rating, content, final_tags = build_tags(modelinfo, ratings, tag_scores, threshold_local, max_tags, ratings_only)
+            rating, content, final_tags = build_tags(modelinfo, ratings, tag_scores, threshold_local, max_tags, ratings_only, keep_underscores=settings["keep_underscores"])
 
             if not privacy:
                 if console.verbose:

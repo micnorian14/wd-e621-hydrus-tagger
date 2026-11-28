@@ -20,6 +20,33 @@ DEFAULT_TIMEOUT = (10, 600)  # (connect, read) seconds; big searches can take mi
 
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 
+# Kaomoji whitelist
+KAOMOJIS = frozenset({
+    "0_0",
+    "(o)_(o)",
+    "+_+",
+    "+_-",
+    "._.",
+    "<o>_<o>",
+    "<|>_<|>",
+    "=_=",
+    ">_<",
+    "3_3",
+    "6_9",
+    ">_o",
+    "@_@",
+    "^_^",
+    "o_o",
+    "u_u",
+    "x_x",
+    "|_|",
+    "||_||",
+    ":d",
+    ":3",
+    ":o",
+    ";d",
+    ":>="
+})
 
 class SafetyError(Exception):
     """Raised when a safety check fails and nothing should be written."""
@@ -100,7 +127,7 @@ def resolve_tag_service(services_json, name=None, key=None, allow_my_tags=False)
     return s_key, s_name, s_type
 
 
-def sanitize_tags(tags, keep_namespace=False):
+def sanitize_tags(tags, keep_namespace=False, keep_underscores=False):
     """Clean a tag list right before it is sent.
 
     Keeps strings only, strips whitespace, drops empties and duplicates (order
@@ -112,18 +139,28 @@ def sanitize_tags(tags, keep_namespace=False):
     """
     out = []
     seen = set()
+
     for tag in tags:
         if not isinstance(tag, str):
             continue
+
         tag = tag.strip()
+
+        if not keep_underscores and tag not in KAOMOJIS:
+            tag = tag.replace("_", " ").strip()
+
         if not tag:
             continue
+
         if not keep_namespace and ":" in tag and not tag.startswith(":"):
             tag = ":" + tag
+
         if tag in seen:
             continue
+
         seen.add(tag)
         out.append(tag)
+
     return out
 
 
