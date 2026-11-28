@@ -756,6 +756,7 @@ def run_batch(settings, skip_resume, state):
         # --skip-tagged: let Hydrus exclude already-tagged files instead of
         # fetching them and skipping after the fact. Uses the current model's
         # own marker so it works for any model the user has installed.
+        # Note: Files excluded in the tag search here won't be counted in the skip count.
         if skip_tagged:
             for marker in expected_markers:
                 negative = "-" + marker
